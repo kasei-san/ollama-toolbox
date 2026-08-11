@@ -1,0 +1,3 @@
+# SEARCH_BACKEND=ddgs（既定）で必要。searxng バックエンドだけ使うなら不要。
+# 旧名は duckduckgo-search。9.x から ddgs にリネームされている。
+ddgs

@@ -1,7 +1,11 @@
-# ollama-search
+# ollama-toolbox
 
-ローカルの Ollama モデルに、必要に応じて web 検索をさせる最小エージェント。
+ローカルの Ollama モデルに tool を持たせる道具箱。今は web 検索。
 Windows 10 + RTX 5060 Ti 16GB で構築。
+
+```
+pip install -r requirements.txt
+```
 
 ```
 start.bat                  対話モード
@@ -20,18 +24,47 @@ stop.bat /all              上記に加えて Ollama も終了する
 `2>nul` で思考だけ捨てられるし、`>out.txt` で答えだけ拾える。
 最初の1問はモデルのロードで50秒ほどかかるが、思考が流れ始めるので止まって見えない。
 
-`start.bat` が Ollama と SearXNG を必要なら起動し、両方が応答するまで待ってから
+`start.bat` が Ollama を必要なら起動し、応答するまで待ってから
 `ollama-search.py` に渡す。既に動いていれば素通りする。
 
-## 終了しても両サービスは残る
+## 検索バックエンドは2つ
 
-`start.bat` は `start` で両方を**切り離して**起動するので、launcher が終わっても
-生き続ける。次回起動が一瞬で済むのでこれは意図どおり。ただし:
+`SEARCH_BACKEND` で切り替える。**既定は `ddgs`。**
+
+| | 中身 | 別プロセス |
+|---|---|---|
+| **`ddgs`**（既定） | pip の [ddgs](https://pypi.org/project/ddgs/)（旧 `duckduckgo-search`） | **不要** |
+| `searxng` | 自前で立てた SearXNG | 要る（`start.bat` が面倒を見る） |
+
+**`ddgs` を既定にしたのは SearXNG のセットアップが丸ごと不要になるから。**
+clone も sparse-checkout も Unix API シムも常駐プロセスも起動待ちも消える。
+プライバシーは同等 — どちらも自分のマシンから検索エンジンへ直接行き、
+仲介するサービスは無い（ollama.com の web search API を使わない理由は後述）。
+
+### どのエンジンが実際に動くか（2026-08-11 実測）
+
+`ddgs` は名前に反して**メタ検索**で、text 用に9エンジンを持つ。結果を返したのは3つだけ:
+
+| 動く | 0件で死ぬ |
+|---|---|
+| **bing / brave / yandex** | duckduckgo / **google** / mojeek / yahoo / startpage / wikipedia |
+
+**`duckduckgo` 本体が死んでいるのは皮肉**だが、**`google` も同じく死んでいる**ので、
+結果として **Google 依存からは完全に離れられている**
+（SearXNG 経由だと結果の75%が `google cse` 由来だった。後述）。
+
+既定は `DDGS_BACKEND="bing,brave,yandex"` と**明示**してある。`auto` でも動くが、
+何を叩いているか読めなくなるため。上記が枯れたら `DDGS_BACKEND` で差し替える。
+
+## 終了してもサービスは残る
+
+`start.bat` は `start` で切り離して起動するので、launcher が終わっても生き続ける。
+次回起動が一瞬で済むのでこれは意図どおり。ただし:
 
 | 残るもの | コスト |
 |---|---|
 | Ollama（2プロセス） | RAM 約98MB |
-| SearXNG（8888 を掴む python） | RAM 約94MB + 最小化された `SearXNG` コンソール窓 |
+| SearXNG（`searxng` バックエンド時のみ） | RAM 約94MB + 最小化された `SearXNG` コンソール窓 |
 | **VRAM** | **約15.8GB。最後の質問から約5分で自動解放** |
 
 RAM は無視できるが **VRAM は無視できない**。**Forge や ComfyUI に移る前は
@@ -47,20 +80,22 @@ RAM は無視できるが **VRAM は無視できない**。**Forge や ComfyUI �
 |---|---|
 | `start.bat` | 入口。起動と待機 |
 | `stop.bat` | VRAM 解放と SearXNG 停止。`/all` で Ollama も |
-| `ollama-search.py` | エージェント本体。標準ライブラリのみ |
-| `settings-local.yml` | SearXNG 設定。**SearXNG の checkout 直下に置く原本** |
+| `ollama-search.py` | エージェント本体。`ddgs` 以外は標準ライブラリのみ |
+| `requirements.txt` | `ddgs`。既定バックエンドに必要 |
+| `settings-local.yml` | SearXNG 設定（`searxng` バックエンド時のみ）。**SearXNG の checkout 直下に置く原本** |
 | `sitecustomize.py` | Unix API シム。**SearXNG の `.venv/Lib/site-packages/` に置く原本** |
 | `start-searxng.ps1` | SearXNG 単体起動。**SearXNG の checkout 直下に置く原本** |
 
 モデルは `hauhau-aggressive:iq2m`（Qwen3.6-35B-A3B Uncensored / IQ2_M、
 `num_ctx 40960` と日付まわりの SYSTEM を焼いた別名）。
-環境変数 `OLLAMA_SEARCH_MODEL` / `SEARXNG_URL` / `OLLAMA_HOST` で差し替えられる。
+環境変数で差し替えられる（下の `## 配置と設定`）。
 
-## なぜ SearXNG を自前で立てるか
+## なぜ ollama.com の web search API を使わないか
 
-Ollama 公式の web search API（`ollama signin` + APIキー、無料）の方が手軽だが、
+公式 API（`ollama signin` + APIキー、無料）の方が手軽だが、
 **検索クエリが ollama.com に送られる**。推論は元々ローカル完結なので外に出るのは
 「何を検索したか」だけだが、それも出したくないという判断。
+`ddgs` も SearXNG も、自分のマシンから検索エンジンへ直接行く。
 
 ## モデルの日付感覚が 2024年5月で止まっている
 
@@ -86,7 +121,11 @@ Ollama 公式の web search API（`ollama signin` + APIキー、無料）の方�
    `AI news January` `AI news March` と月を変えて延々と検索し直した。
    打ち切り時は集めた結果から答えさせる（**記憶から答えさせるのとは別物**）
 
-## SearXNG を Windows で動かすための細工
+## SearXNG バックエンドを使う場合
+
+**`ddgs` を使うならこの節は丸ごと不要。**
+
+### Windows で動かすための細工
 
 Docker も WSL も使っていない。**SearXNG は Linux 前提だが、依存に uwsgi も uvloop も
 無いので Windows の Python でそのまま動く。**
@@ -97,7 +136,7 @@ Docker も WSL も使っていない。**SearXNG は Linux 前提だが、依存
    ```sh
    # このリポジトリと並べて置くと start.bat が既定で見つける
    #   <親>/searxng
-   #   <親>/ollama-search
+   #   <親>/ollama-toolbox
    git clone --depth 1 https://github.com/searxng/searxng.git ../searxng
    cd ../searxng
    git sparse-checkout set --no-cone '/*' '!/utils/templates/*'
@@ -112,7 +151,7 @@ Docker も WSL も使っていない。**SearXNG は Linux 前提だが、依存
 
 **JSON 出力は既定で無効。** `settings-local.yml` の `search.formats` で有効化している。
 
-### 実際に使われている検索エンジン（2026-08-11 実測）
+### SearXNG 側で実際に使われているエンジン（2026-08-11 実測）
 
 `use_default_settings: true` なので general カテゴリの **61エンジンすべてが叩かれる**が、
 **実際に結果を返しているのは2つだけ**。3クエリ80件の内訳:
@@ -160,24 +199,28 @@ Docker も WSL も使っていない。**SearXNG は Linux 前提だが、依存
 
 * `web_fetch` は正規表現でタグを落とすだけの簡易実装。依存を増やしたくなかったため。
   JS 描画のページでは本文が取れない
-* SearXNG は常駐化していない（`start.bat` が都度起動する）
+* `ddgs` は非公式ライブラリで、各エンジンのスクレイピングに依存している。
+  **動くエンジンの顔ぶれは今後変わる**（現に duckduckgo と google は既に死んでいる）
+* SearXNG は常駐化していない（`searxng` バックエンド時、`start.bat` が都度起動する）
 * 年月の除去は正規表現。`(?:19|20)\d{2}` に限定しているが、
   `GPT-2024` のような命名があれば誤爆しうる
 
 ## 配置と設定
 
-`start.bat` は **SearXNG がこのリポジトリと並んでいる**ことを既定とする:
+**`searxng` バックエンドを使う場合のみ**、SearXNG がこのリポジトリと並んでいることを既定とする:
 
 ```
 <親ディレクトリ>/
   searxng/          <- SearXNG の checkout（venv 込み）
-  ollama-search/    <- このリポジトリ
+  ollama-toolbox/   <- このリポジトリ
 ```
 
 別の場所に置くなら環境変数で上書きする:
 
 | 変数 | 既定 |
 |---|---|
+| `SEARCH_BACKEND` | `ddgs`（`searxng` も可） |
+| `DDGS_BACKEND` | `bing,brave,yandex` |
 | `SEARXNG_DIR` | `<このリポジトリ>/../searxng` |
 | `SEARXNG_URL` | `http://127.0.0.1:8888` |
 | `OLLAMA_HOST` | `http://localhost:11434` |

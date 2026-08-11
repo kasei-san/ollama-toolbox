@@ -45,6 +45,13 @@ call :waitfor "%OLLAMA_URL%" 30 Ollama || goto :fail
 
 :searxng
 REM --- 2/2  SearXNG ----------------------------------------------------------
+REM  Only the "searxng" backend needs a separate process.  The default (ddgs)
+REM  reaches the search engines from inside the Python process, so skip all this.
+if not defined SEARCH_BACKEND set "SEARCH_BACKEND=ddgs"
+if /i not "%SEARCH_BACKEND%"=="searxng" (
+    echo [2/2] SearXNG   : not needed ^(SEARCH_BACKEND=%SEARCH_BACKEND%^)
+    goto :run
+)
 curl -s -m 3 -o nul "%SEARXNG_URL%"
 if not errorlevel 1 (
     echo [2/2] SearXNG   : already running
@@ -69,7 +76,10 @@ call :waitfor "%SEARXNG_URL%" 90 SearXNG || goto :fail
 
 :run
 echo.
-python "%HERE%ollama-search.py" %*
+REM  Prefer this repo's venv (it has ddgs); fall back to whatever python is on PATH.
+set "PY=python"
+if exist "%HERE%.venv\Scripts\python.exe" set "PY=%HERE%.venv\Scripts\python.exe"
+"%PY%" "%HERE%ollama-search.py" %*
 exit /b %errorlevel%
 
 REM --- helper: poll a URL until it answers -----------------------------------
