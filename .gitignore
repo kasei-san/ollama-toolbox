@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+.venv/
+ddgs_test.txt
+eng_test.txt
+multi.txt

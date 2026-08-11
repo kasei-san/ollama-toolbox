@@ -9,12 +9,16 @@
 思考の中身は stderr にリアルタイムで流す。答えは stdout なので、
 `... 2>nul` で思考だけ捨てられるし、`... >out.txt` で答えだけ拾える。
 
-前提: ローカルの SearXNG が起動していること（`start.bat` が面倒を見る）。
+検索バックエンドは2つ。`SEARCH_BACKEND` で切り替える。
 
-検索バックエンドに ollama.com ではなく自前の SearXNG を使うのは**プライバシーのため**。
-ollama.com の web search API は無料で手軽だが、検索クエリが ollama.com に送られる。
-モデルの推論は元々ローカル完結なので、外に出るのは「何を検索したか」だけだが、
-それも出したくないという判断。
+  ddgs    （既定）pip の ddgs。外部プロセス不要。bing/brave/yandex を叩く
+  searxng 自前で立てた SearXNG（別プロセスが要る。start.bat が面倒を見る）
+
+どちらも **ollama.com の web search API は使わない**。あれは無料で手軽だが、
+検索クエリが ollama.com に送られる。モデルの推論は元々ローカル完結なので
+外に出るのは「何を検索したか」だけだが、それも出したくないという判断。
+ddgs / SearXNG はどちらも自分のマシンから検索エンジンに直接行くので、
+その点では同等。
 
 なぜ強制オプションがあるか:
   「日本の首相は？」のような質問で、モデルは4〜6割の確率で検索せず記憶から答える
@@ -45,6 +49,17 @@ MODEL = os.environ.get("OLLAMA_SEARCH_MODEL", "hauhau-aggressive:iq2m")
 SEARXNG = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8888")
 MAX_ROUNDS = 4
 FETCH_CHARS = 6000
+
+# 検索バックエンド: "ddgs"（既定、pip の ddgs が要る）か "searxng"
+BACKEND = os.environ.get("SEARCH_BACKEND", "ddgs").lower()
+
+# ddgs が内部で叩くエンジン。2026-08-11 の実測で**結果を返したのはこの3つだけ**:
+#   動く    : bing / brave / yandex
+#   0件で死ぬ: duckduckgo / google / mojeek / yahoo / startpage / wikipedia
+# duckduckgo 本体が死んでいるのは皮肉だが、**google も同じく死んでいる**ので、
+# 結果として Google 依存からは完全に離れられている。
+# "auto" にすると ddgs が勝手に選ぶ。明示した方が挙動が読めるので既定は明示。
+DDGS_BACKEND = os.environ.get("DDGS_BACKEND", "bing,brave,yandex")
 
 TOOLS = [
     {"type": "function", "function": {
@@ -121,6 +136,26 @@ def ollama_chat(messages, tools=TOOLS, think=False, show_think=False):
     if tool_calls:
         out["tool_calls"] = tool_calls
     return out
+
+
+def ddgs_search(query, max_results):
+    """ddgs（旧 duckduckgo-search）で検索する。外部プロセス不要。"""
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        return {"error": "ddgs が入っていない。`pip install -r requirements.txt` するか、"
+                         "SEARCH_BACKEND=searxng に切り替えること。"}
+    try:
+        hits = DDGS().text(query, max_results=max_results, backend=DDGS_BACKEND)
+    except Exception as e:                                  # noqa: BLE001
+        # ddgs は0件も例外で投げてくる（DDGSException: No results found）
+        return {"error": f"ddgs 検索に失敗 ({DDGS_BACKEND}): {type(e).__name__}: {e}"}
+    if not hits:
+        return {"error": f"'{query}' の検索結果が 0 件 (backend={DDGS_BACKEND})"}
+    return {"query": query,
+            "results": [{"title": h.get("title", ""),
+                         "url": h.get("href", ""),
+                         "content": (h.get("body") or "")[:600]} for h in hits]}
 
 
 def searxng_search(query, max_results):
@@ -202,7 +237,8 @@ def run_tool(name, args, user_question=""):
         q = strip_stale_year(args.get("query", ""), user_question)
         if q != args.get("query", ""):
             print(f"  [年号を除去] {args.get('query')!r} -> {q!r}", file=sys.stderr)
-        res = searxng_search(q, max(1, min(10, int(mr))))
+        n = max(1, min(10, int(mr)))
+        res = ddgs_search(q, n) if BACKEND == "ddgs" else searxng_search(q, n)
     elif name == "web_fetch":
         res = web_fetch(args.get("url", ""))
     else:
