@@ -182,7 +182,7 @@ BRAVE_API_KEY=xxxxxxxxxxxxxxxx
 | | |
 |---|---|
 | [`setup.md`](docs/setup.md) | Ollama とモデルの導入手順 |
-| [`vram.md`](docs/vram.md) | VRAM の実測。**flash attention を入れる理由**、`num_ctx` の効き方、量子化の選択肢 |
+| [`vram.md`](docs/vram.md) | VRAM の実測。**flash attention を入れる理由**、`num_ctx` の効き方、外れた仮説 |
 | [`model-date-sense.md`](docs/model-date-sense.md) | モデルの日付感覚と、機械的に潰している3つ |
 | [`conversation.md`](docs/conversation.md) | 会話の文脈の持ち方。溢れたときの削り方 |
 | [`webui.md`](docs/webui.md) | web の画面の設計判断と既知の粗さ |
