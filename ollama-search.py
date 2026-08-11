@@ -2,8 +2,12 @@
 """ollama-search.py -- ローカル Ollama モデルに web 検索をさせる最小エージェント。
 
   python ollama-search.py "日銀の直近の決定は？"
-  python ollama-search.py            # 対話モード
+  python ollama-search.py            # 対話モード（exit / quit / 終了 で抜ける）
   python ollama-search.py -f "..."   # 検索を強制（モデルの判断に任せない）
+  python ollama-search.py --no-think # 思考を切る（速いが精度は落ちる）
+
+思考の中身は stderr にリアルタイムで流す。答えは stdout なので、
+`... 2>nul` で思考だけ捨てられるし、`... >out.txt` で答えだけ拾える。
 
 前提: ローカルの SearXNG が起動していること。
 
@@ -26,6 +30,13 @@ for _s in ("stdout", "stderr"):
     _f = getattr(sys, _s)
     if hasattr(_f, "buffer"):
         setattr(sys, _s, io.TextIOWrapper(_f.buffer, encoding="utf-8", errors="replace"))
+
+# パイプで流し込まれた stdin も cp932 として読まれ、日本語が壊れる
+# （実際モデルが "garbled characters (likely mojibake)" と指摘して発覚した）。
+# **端末から直接打つときは触らない**: その場合 Windows の Python はコンソール API
+# 経由で Unicode を正しく読むので、UTF-8 を強制すると逆に壊す。
+if not sys.stdin.isatty() and hasattr(sys.stdin, "buffer"):
+    sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
 
 
 class SearchFailed(Exception):
@@ -61,11 +72,57 @@ def post(url, payload, headers, timeout):
         return json.loads(r.read().decode("utf-8"))
 
 
-def ollama_chat(messages, tools=TOOLS):
-    body = {"model": MODEL, "messages": messages, "stream": False, "think": False}
+def ollama_chat(messages, tools=TOOLS, think=False, show_think=False):
+    """Ollama に投げて assistant メッセージを組み立てて返す。
+
+    常にストリーミングで受ける。思考を出すのが目的で、まとめて受け取ると
+    最初の1問で50秒ほど無言になり、止まっているのか考えているのか分からない。
+    思考は stderr に流し、答え（stdout）と混ざらないようにしている。
+    """
+    body = {"model": MODEL, "messages": messages, "stream": True, "think": think}
     if tools:
         body["tools"] = tools
-    return post(f"{OLLAMA}/api/chat", body, {}, 600)["message"]
+
+    req = urllib.request.Request(
+        f"{OLLAMA}/api/chat", json.dumps(body).encode("utf-8"),
+        {"Content-Type": "application/json"})
+
+    content, thinking, tool_calls, opened = [], [], [], False
+    with urllib.request.urlopen(req, timeout=900) as r:
+        for raw in r:
+            raw = raw.strip()
+            if not raw:
+                continue
+            chunk = json.loads(raw.decode("utf-8"))
+            msg = chunk.get("message") or {}
+
+            piece = msg.get("thinking")
+            if piece:
+                thinking.append(piece)
+                if show_think:
+                    if not opened:
+                        print("  [think] ", end="", file=sys.stderr, flush=True)
+                        opened = True
+                    # 思考は改行だらけなので、字下げを保って読めるようにする
+                    print(piece.replace("\n", "\n          "),
+                          end="", file=sys.stderr, flush=True)
+
+            if msg.get("content"):
+                content.append(msg["content"])
+            if msg.get("tool_calls"):
+                tool_calls.extend(msg["tool_calls"])
+            if chunk.get("done"):
+                break
+
+    if opened:
+        print("\n", file=sys.stderr, flush=True)
+
+    out = {"role": "assistant", "content": "".join(content)}
+    if thinking:
+        out["thinking"] = "".join(thinking)
+    if tool_calls:
+        out["tool_calls"] = tool_calls
+    return out
 
 
 def searxng_search(query, max_results):
@@ -160,7 +217,8 @@ def run_tool(name, args, user_question=""):
     return res
 
 
-def ask(question, force=False, verbose=True):
+def ask(question, force=False, verbose=True, think=True):
+    show = verbose and think
     messages = [{"role": "user", "content": question}]
     if force:
         # モデルの判断に任せず、こちらで1回目の検索を済ませて結果を渡す。
@@ -171,7 +229,7 @@ def ask(question, force=False, verbose=True):
                          "content": json.dumps(res, ensure_ascii=False)[:8000]})
 
     for _ in range(MAX_ROUNDS):
-        msg = ollama_chat(messages)
+        msg = ollama_chat(messages, think=think, show_think=show)
         calls = msg.get("tool_calls")
         if not calls:
             return msg.get("content", "")
@@ -194,7 +252,8 @@ def ask(question, force=False, verbose=True):
     messages.append({"role": "user", "content":
                      "Stop searching. Answer now using only the search results above. "
                      "If they are insufficient, say so explicitly."})
-    return ollama_chat(messages, tools=None).get("content", "")
+    return ollama_chat(messages, tools=None, think=think,
+                       show_think=show).get("content", "")
 
 
 def main():
@@ -202,17 +261,22 @@ def main():
     ap.add_argument("question", nargs="*")
     ap.add_argument("-f", "--force", action="store_true",
                     help="モデルの判断を待たず必ず検索する")
-    ap.add_argument("-q", "--quiet", action="store_true", help="ツール呼び出しを表示しない")
+    ap.add_argument("-q", "--quiet", action="store_true",
+                    help="ツール呼び出しと思考を表示しない")
+    ap.add_argument("--no-think", dest="think", action="store_false",
+                    help="思考を切る（速くなるが精度は落ちる）")
     a = ap.parse_args()
 
     if a.question:
         try:
-            print(ask(" ".join(a.question), a.force, not a.quiet))
+            print(ask(" ".join(a.question), a.force, not a.quiet, a.think))
         except SearchFailed as e:
             print(f"検索に失敗した: {e}", file=sys.stderr)
             sys.exit(1)
         return
-    print(f"model={MODEL}  Ctrl-C で終了。行頭 '!' で検索を強制。", file=sys.stderr)
+    print(f"model={MODEL}", file=sys.stderr)
+    print("  exit / quit / 終了 または Ctrl-C で抜ける", file=sys.stderr)
+    print("  行頭 '!' で検索を強制", file=sys.stderr)
     while True:
         try:
             q = input("> ").strip()
@@ -221,9 +285,11 @@ def main():
             return
         if not q:
             continue
+        if q.lower() in ("exit", "quit", ":q", ":wq", "終了", "おわり"):
+            return
         force = a.force or q.startswith("!")
         try:
-            print(ask(q.lstrip("!").strip(), force, not a.quiet))
+            print(ask(q.lstrip("!").strip(), force, not a.quiet, a.think))
         except SearchFailed as e:
             print(f"検索に失敗した: {e}", file=sys.stderr)
 

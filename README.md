@@ -7,10 +7,18 @@ Windows 10 + RTX 5060 Ti 16GB で構築。
 start.bat                  対話モード
 start.bat "日銀の直近の決定は？"
 start.bat -f "..."         検索を強制（モデルの判断に任せない）
+start.bat --no-think       思考を切る（速いが精度は落ちる）
 
 stop.bat                   VRAM を解放して SearXNG を止める
 stop.bat /all              上記に加えて Ollama も終了する
 ```
+
+対話モードは **`exit` / `quit` / `終了` / `おわり` / `:q`**（大小文字問わず）か
+`Ctrl-C` で抜ける。
+
+**モデルの思考は stderr にリアルタイムで流れる。** 答えは stdout なので分離されており、
+`2>nul` で思考だけ捨てられるし、`>out.txt` で答えだけ拾える。
+最初の1問はモデルのロードで50秒ほどかかるが、思考が流れ始めるので止まって見えない。
 
 `start.bat` が Ollama と SearXNG を必要なら起動し、両方が応答するまで待ってから
 `ollama-search.py` に渡す。既に動いていれば素通りする。
