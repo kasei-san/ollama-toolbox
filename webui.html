@@ -64,6 +64,22 @@
   }
   #bar .sp { flex: 1; }
   #bar .meta { color: var(--dim); }
+
+  /* VRAM インジケーター。2本重ねてある:
+       下(--used)  GPU 全体の使用量
+       上(--model) そのうち今のモデルが載せている分
+     「空きが無い」のか「このモデルが食っている」のかを一目で分けるため。 */
+  #vram { display: flex; align-items: center; gap: 7px; color: var(--dim); }
+  #vram .gauge {
+    width: 110px; height: 10px; border-radius: 5px; background: var(--line);
+    position: relative; overflow: hidden; flex: none;
+  }
+  #vram .gauge i { position: absolute; top: 0; bottom: 0; left: 0; }
+  #vram .gauge .used  { background: var(--dim); opacity: .55; }
+  #vram .gauge .model { background: var(--accent); }
+  #vram.tight .gauge .used { background: var(--warn); opacity: .75; }
+  #vram .num { font-variant-numeric: tabular-nums; }
+  #vram .off { color: var(--warn); }
   #sysbox { border-bottom: 1px solid var(--line); padding: 10px 12px; display: none; }
   #sysbox textarea { width: 100%; min-height: 90px; resize: vertical;
     background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
@@ -113,6 +129,7 @@
     <button id="force" title="毎回かならず検索する">force</button>
     <button id="sysbtn">system</button>
     <span class="sp"></span>
+    <span id="vram" title="VRAM"></span>
     <span class="meta" id="meta"></span>
   </div>
 
@@ -322,6 +339,56 @@ async function send() {
   }
 }
 
+// --- VRAM インジケーター --------------------------------------------------
+const gb = mb => (mb / 1024).toFixed(1);
+
+async function refreshVram() {
+  // タブが見えていないときは測りに行かない。nvidia-smi は毎回プロセスが起きる。
+  if (document.hidden) return;
+  try { renderVram(await api("GET", "/api/vram")); } catch (e) { /* 落ちても黙る */ }
+}
+
+async function pollVram() {
+  await refreshVram();
+  // 生成中は VRAM が動くので短く、待っている間は長く。
+  setTimeout(pollVram, state.busy ? 2000 : 6000);
+}
+
+function renderVram(v) {
+  const box = $("#vram");
+  box.textContent = "";
+  if (!v.gpu) {                       // nvidia-smi が無い環境。数字だけ諦める
+    box.append(el("span", "num", "VRAM 不明"));
+    return;
+  }
+  const { total_mb, used_mb } = v.gpu;
+  // 上部で選んでいるモデルではなく、**いま実際に載っているもの**を見る。
+  const mine = v.loaded.find(m => m.name === $("#model").value);
+  const g = el("div", "gauge");
+  const used = el("i", "used"), model = el("i", "model");
+  used.style.width = Math.min(100, used_mb / total_mb * 100) + "%";
+  model.style.width = (mine ? Math.min(100, mine.vram_mb / total_mb * 100) : 0) + "%";
+  g.append(used, model);
+
+  const free = total_mb - used_mb;
+  box.classList.toggle("tight", free < 2048);   // 2GB を切ったら赤
+  box.append(el("span", null, "VRAM"), g,
+             el("span", "num", `${gb(used_mb)}/${gb(total_mb)}GB`));
+  if (mine) {
+    box.append(el("span", "num", `· ${gb(mine.vram_mb)}GB`));
+    // size と size_vram の差が CPU に溢れた分。0 でなければ 100% GPU ではない。
+    const cpu = mine.size_mb - mine.vram_mb;
+    if (cpu > 0) box.append(el("span", "off", `(CPU に ${gb(cpu)}GB)`));
+    box.title = `${mine.name}: VRAM ${gb(mine.vram_mb)}GB` +
+                (mine.context_length ? ` / num_ctx ${mine.context_length}` : "") +
+                `\nGPU 全体 ${gb(used_mb)} / ${gb(total_mb)}GB（空き ${gb(free)}GB）`;
+  } else {
+    box.append(el("span", "num", "· 未ロード"));
+    box.title = `${$("#model").value} はまだ載っていない\n` +
+                `GPU 全体 ${gb(used_mb)} / ${gb(total_mb)}GB（空き ${gb(free)}GB）`;
+  }
+}
+
 function hitsBlock(res) {
   // web_search は results[]、web_fetch は text。それ以外は生で見せる。
   if (res && Array.isArray(res.results)) {
@@ -370,8 +437,16 @@ function hitsBlock(res) {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
   });
 
+  // モデルを変えたら、そのモデルの載り具合をすぐ見たい
+  sel.onchange = refreshVram;
+  // 裏にいる間は測らないので、表に戻った瞬間の表示は古い。すぐ測り直す。
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refreshVram();
+  });
+
   await loadChats();
   if (state.chats.length) openChat(state.chats[0].id);
+  pollVram();
   $("#q").focus();
 })();
 </script>

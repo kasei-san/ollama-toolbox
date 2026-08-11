@@ -13,7 +13,7 @@ CLI と**同じエージェント**（`ask()` / `Conversation`）を呼ぶ。画
 **127.0.0.1 にしか bind しない。** モデルの求めに応じて任意の URL を取りに行く
 （`web_fetch`）ので、外から叩ける場所に置くと踏み台になる。
 """
-import argparse, importlib.util, json, os, sqlite3, sys, threading, time
+import argparse, importlib.util, json, os, sqlite3, subprocess, sys, threading, time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -133,6 +133,55 @@ def save_message(chat_id, turn, seq, msg, thinking=""):
 # --------------------------------------------------------------------------
 # Ollama の状態
 # --------------------------------------------------------------------------
+_VRAM_CACHE = {"at": 0.0, "value": None}
+_VRAM_LOCK = threading.Lock()
+
+
+def gpu_memory():
+    """`nvidia-smi` から VRAM の合計と使用量（MiB）を取る。取れなければ None。
+
+    **数秒キャッシュする。** 画面が数秒おきに聞いてくるうえ、タブが複数あれば
+    その数だけ来る。`nvidia-smi` は毎回プロセスを起こすので、素通しにはしない。
+    """
+    with _VRAM_LOCK:
+        if time.time() - _VRAM_CACHE["at"] < 2.0:
+            return _VRAM_CACHE["value"]
+    val = None
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total,memory.used",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+            # Windows で毎回コンソール窓が一瞬出るのを防ぐ
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if out.returncode == 0:
+            total, used = out.stdout.strip().splitlines()[0].split(",")
+            val = {"total_mb": int(total), "used_mb": int(used)}
+    except Exception:                                       # noqa: BLE001
+        val = None                     # nvidia-smi が無い/失敗。GPU 表示は諦める
+    with _VRAM_LOCK:
+        _VRAM_CACHE.update(at=time.time(), value=val)
+    return val
+
+
+def loaded_models():
+    """Ollama にロード済みのモデルと、それぞれが VRAM に載せている量。
+
+    `size_vram` は**KV キャッシュ込み**。`size` との差が CPU に溢れた分なので、
+    そこが 0 でなければ 100% GPU に載っていない。
+    """
+    try:
+        with urllib.request.urlopen(f"{agent.OLLAMA}/api/ps", timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:                                       # noqa: BLE001
+        return []
+    return [{"name": m.get("name", ""),
+             "size_mb": round((m.get("size") or 0) / 1048576),
+             "vram_mb": round((m.get("size_vram") or 0) / 1048576),
+             "context_length": m.get("context_length")}
+            for m in data.get("models") or []]
+
+
 def list_models():
     try:
         with urllib.request.urlopen(f"{agent.OLLAMA}/api/tags", timeout=15) as r:
@@ -194,6 +243,9 @@ class Handler(BaseHTTPRequestHandler):
                 "backend": agent.BACKEND, "safesearch": agent.SAFESEARCH,
                 "num_ctx": agent.detect_num_ctx(),
             })
+        if path == "/api/vram":
+            return self._json({"gpu": gpu_memory(), "loaded": loaded_models(),
+                               "model": agent.MODEL})
         if path == "/api/chats":
             with db() as con:
                 rows = con.execute(
