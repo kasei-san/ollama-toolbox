@@ -62,6 +62,28 @@ clone も sparse-checkout も Unix API シムも常駐プロセスも起動待�
 既定は `DDGS_BACKEND="bing,brave,yandex"` と**明示**してある。`auto` でも動くが、
 何を叩いているか読めなくなるため。上記が枯れたら `DDGS_BACKEND` で差し替える。
 
+### DuckDuckGo の公式 API は使えない（2026-08-11 調査）
+
+**DuckDuckGo に公式の web 検索 API は存在しない。** 唯一公開されているのは
+Instant Answer API（`api.duckduckgo.com`）だが、これは検索 API ではない。実測:
+
+| クエリ | 結果 |
+|---|---|
+| `python programming language` | Wikipedia の要約が返る |
+| `current prime minister of Japan` | **完全に空** |
+| `RTX 5060 Ti review` | **完全に空** |
+
+**`Results` は常に `[]`** で、web リンクを一切返さない。エンティティ辞書であって検索ではない。
+
+スクレイピング用によく使われる `html.duckduckgo.com/html/` も試したが、
+**CAPTCHA ページが返って結果 0 件**。`ddgs` の `duckduckgo` バックエンドが
+死んでいるのはこれが理由。
+
+**より安定させたいなら公式 API のある [Brave Search API](https://brave.com/search/api/)
+（無料枠 2,000 クエリ/月）に移るのが筋。** brave は既に動いている3エンジンの1つなので、
+スクレイピングから公式 API に置き換える形になり、レート制限と HTML 変更の
+リスクが消える。**`ddgs` はスクレイピングなので各サイトの規約上もグレー**である点も併せて。
+
 ## 終了してもサービスは残る
 
 `start.bat` は `start` で切り離して起動するので、launcher が終わっても生き続ける。
