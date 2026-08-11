@@ -62,6 +62,46 @@ clone も sparse-checkout も Unix API シムも常駐プロセスも起動待�
 既定は `DDGS_BACKEND="bing,brave,yandex"` と**明示**してある。`auto` でも動くが、
 何を叩いているか読めなくなるため。上記が枯れたら `DDGS_BACKEND` で差し替える。
 
+### セーフサーチは既定で off
+
+`SEARCH_SAFESEARCH` で `off` / `moderate` / `strict`。**既定は `off`。**
+
+**バックエンドごとに語彙が違う**ので、ツール側で正準語を決めて変換している:
+
+| このツール | ddgs | SearXNG |
+|---|---|---|
+| `off` | `off` | `0` |
+| `moderate` | `moderate` | `1` |
+| `strict` | **`on`** | `2` |
+
+`ddgs` の最も厳しい値は `on` で、**`strict` は無効値**。しかも
+**ddgs は無効値を渡しても例外にならず素通しする**ので、
+このツールは起動時に検証して**無効値なら即座に落ちる**（`exit 1`）。
+黙って既定に戻すと `stict` のようなタイポで「厳しくしたつもりが素通し」になり、
+フォールバックが安全側の逆に倒れるため。前後の空白と大文字は正規化する。
+
+**既定を `off` にしているのは、このツールが uncensored モデルに tool を持たせる
+ためのもので、モデル側が素通しなのに検索側だけ絞るのは一貫しないから。**
+
+#### 効いていることの実測（2026-08-11）
+
+同一クエリで値を振り、結果集合のハッシュ／件数を比較:
+
+| | off | moderate | strict |
+|---|---|---|---|
+| ddgs / bing | 別ハッシュ | 別ハッシュ | 別ハッシュ |
+| ddgs / yandex | 別ハッシュ | 別ハッシュ | 別ハッシュ |
+| ddgs / brave | 計測時レート制限で取得不可 | 〃 | 〃 |
+| SearXNG | **46件** | **30件** | **20件** |
+
+`brave` だけ未確認。
+
+### この設定と無関係に返らないもの
+
+**各検索エンジンが違法と判定したものは、こちらの設定に関係なく元から返らない。**
+セーフサーチはあくまで各エンジンが持つフィルタの強度指定であって、
+それを超えて何かを取りに行く機能ではない。
+
 ### DuckDuckGo の公式 API は使えない（2026-08-11 調査）
 
 **DuckDuckGo に公式の web 検索 API は存在しない。** 唯一公開されているのは
@@ -249,6 +289,7 @@ Docker も WSL も使っていない。**SearXNG は Linux 前提だが、依存
 |---|---|
 | `SEARCH_BACKEND` | `ddgs`（`searxng` も可） |
 | `DDGS_BACKEND` | `bing,brave,yandex` |
+| `SAFESEARCH` | `off`（`moderate` / `strict` も可） |
 | `SEARXNG_DIR` | `<このリポジトリ>/../searxng` |
 | `SEARXNG_URL` | `http://127.0.0.1:8888` |
 | `OLLAMA_HOST` | `http://localhost:11434` |
