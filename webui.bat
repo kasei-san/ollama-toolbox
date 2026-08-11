@@ -20,10 +20,20 @@ if not defined OLLAMA_HOST set "OLLAMA_HOST=http://localhost:11434"
 if not defined WEBUI_PORT set "WEBUI_PORT=4645"
 set "OLLAMA_URL=%OLLAMA_HOST%/api/tags"
 
+REM  Flash attention.  Measured 2026-08-11 with the daily model at num_ctx
+REM  40960:  17.40 GiB -> 11.84 GiB of VRAM.  See README, "## VRAM が足りないとき".
+if not defined OLLAMA_FLASH_ATTENTION set "OLLAMA_FLASH_ATTENTION=1"
+
 REM --- Ollama ----------------------------------------------------------------
 curl -s -m 3 -o nul "%OLLAMA_URL%"
 if not errorlevel 1 (
+    REM  Env vars only reach Ollama when WE start it.  A server that is already
+    REM  up keeps whatever it was started with, so say so rather than letting
+    REM  the setting silently not apply.
     echo [1/2] Ollama    : already running
+    echo                   ^(flash attention setting not applied to a running
+    echo                    server; set OLLAMA_FLASH_ATTENTION=1 as a user
+    echo                    environment variable to make it stick^)
     goto :run
 )
 echo [1/2] Ollama    : starting...
