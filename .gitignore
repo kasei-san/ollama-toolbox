@@ -7,3 +7,6 @@ eng_test.txt
 multi.txt
 ss.txt
 *.tmp
+
+# API キー。絶対にコミットしない
+.env
