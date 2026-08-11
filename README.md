@@ -7,16 +7,38 @@ Windows 10 + RTX 5060 Ti 16GB で構築。
 start.bat                  対話モード
 start.bat "日銀の直近の決定は？"
 start.bat -f "..."         検索を強制（モデルの判断に任せない）
+
+stop.bat                   VRAM を解放して SearXNG を止める
+stop.bat /all              上記に加えて Ollama も終了する
 ```
 
 `start.bat` が Ollama と SearXNG を必要なら起動し、両方が応答するまで待ってから
 `ollama-search.py` に渡す。既に動いていれば素通りする。
+
+## 終了しても両サービスは残る
+
+`start.bat` は `start` で両方を**切り離して**起動するので、launcher が終わっても
+生き続ける。次回起動が一瞬で済むのでこれは意図どおり。ただし:
+
+| 残るもの | コスト |
+|---|---|
+| Ollama（2プロセス） | RAM 約98MB |
+| SearXNG（8888 を掴む python） | RAM 約94MB + 最小化された `SearXNG` コンソール窓 |
+| **VRAM** | **約15.8GB。最後の質問から約5分で自動解放** |
+
+RAM は無視できるが **VRAM は無視できない**。**Forge や ComfyUI に移る前は
+`stop.bat` を叩く**こと（実測 15826 → 604 MiB）。5分待てば自動で解放されるので、
+急がないなら放っておいてもよい。
+
+`stop.bat` は **8888 を LISTEN しているポートから PID を引いて**落とす。
+イメージ名で `python.exe` を殺すと ComfyUI や他のスクリプトを巻き込むため。
 
 ## 構成
 
 | ファイル | |
 |---|---|
 | `start.bat` | 入口。起動と待機 |
+| `stop.bat` | VRAM 解放と SearXNG 停止。`/all` で Ollama も |
 | `ollama-search.py` | エージェント本体。標準ライブラリのみ |
 | `settings-local.yml` | SearXNG 設定。**`E:\llm\searxng\` に置く原本** |
 | `sitecustomize.py` | Unix API シム。**`E:\llm\searxng\.venv\Lib\site-packages\` に置く原本** |
