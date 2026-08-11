@@ -19,6 +19,8 @@ start.bat "日銀の直近の決定は？"
 start.bat -f "..."         検索を強制（モデルの判断に任せない）
 start.bat --no-think       思考を切る（速いが精度は落ちる）
 
+webui.bat                  web の画面（http://127.0.0.1:4645）
+
 stop.bat                   VRAM を解放して SearXNG を止める
 stop.bat /all              上記に加えて Ollama も終了する
 ```
@@ -70,6 +72,51 @@ stop.bat /all              上記に加えて Ollama も終了する
 
 `start.bat` が Ollama を必要なら起動し、応答するまで待ってから
 `ollama-search.py` に渡す。既に動いていれば素通りする。
+
+## web の画面（`webui.bat`）
+
+`webui.bat` で `http://127.0.0.1:4645`。CLI と**同じエージェント**（`ask()` /
+`Conversation`）を呼ぶので、年号の除去・検索失敗での打ち切り・上限到達時の回答強制は
+そのまま効く。画面が増えるだけ。
+
+| | |
+|---|---|
+| 会話ログ | 左に一覧。**サーバを再起動しても続きから話せる**（隣の `chats.sqlite`） |
+| システムプロンプト | `system` ボタンから会話ごとに設定。空にすると Modelfile の SYSTEM に戻る |
+| 思考 | 折りたたみで表示。届いた端から流れる |
+| 検索結果 | タイトルと URL のリンク付きで見える（モデルが何を見て答えたかが追える） |
+| モデル | 上部で切り替え |
+| `think` / `force` | CLI の `--no-think` / `-f` と同じ |
+
+**CLI との一番の違いは、文脈が sqlite にあること。** CLI の対話モードはプロセスが
+死ねば消えるが、こちらは残る。ログが正なので、別のタブから続きを書いても同じ文脈になる。
+
+### 127.0.0.1 にしか bind しない
+
+モデルの求めに応じて**任意の URL を取りに行く**（`web_fetch`）ので、
+外から叩ける場所に置くと踏み台になる。認証も無い。
+
+### 生成は同時に1本まで
+
+モデルが1つしか動かないので、2本目は `409` を返して**待たせない**。
+待たせると、待っている側のブラウザが黙って固まる。
+
+### ブラウザを閉じても生成は止まらない
+
+途中経過を送れなくなっても、答えは最後まで作って sqlite に入れる。
+走らせた推論と検索を捨てるのは惜しいので、開き直せば続きから読める。
+
+### なぜ公式の Ollama アプリを使わないか
+
+**足りないため。** 公式アプリ（0.32.7）の `db.sqlite` を見ると、
+会話ログ（`chats` / `messages` / `tool_calls`）は持っているが:
+
+* **システムプロンプトの列がどこにも無い。** Modelfile に焼く以外の手が無い
+* **MCP / 外部ツールの口が無い。** `settings` にあるのは `tools` `agent` `browser`
+  `websearch_enabled` の boolean だけで、内蔵ツールの on/off でしかない
+
+`websearch_enabled` は **ollama.com の web search API**（下の
+`## なぜ ollama.com の web search API を使わないか`）。ここを使うなら前提が崩れる。
 
 ## 会話の文脈
 
@@ -316,9 +363,12 @@ RAM は無視できるが **VRAM は無視できない**。**Forge や ComfyUI �
 
 | ファイル | |
 |---|---|
-| `start.bat` | 入口。起動と待機 |
+| `start.bat` | CLI の入口。起動と待機 |
+| `webui.bat` | web の画面の入口 |
 | `stop.bat` | VRAM 解放と SearXNG 停止。`/all` で Ollama も |
 | `ollama-search.py` | エージェント本体。`ddgs` 以外は標準ライブラリのみ |
+| `webui.py` | web サーバ。**標準ライブラリのみ**（`http.server` + `sqlite3`） |
+| `webui.html` | 画面。1ファイル、フレームワーク不使用 |
 | `requirements.txt` | `ddgs`。`ddgs` バックエンドに必要（brave は stdlib のみ） |
 | `.env.example` | キーの雛形。`.env` にコピーして使う |
 | `settings-local.yml` | SearXNG 設定（`searxng` バックエンド時のみ）。**SearXNG の checkout 直下に置く原本** |
@@ -443,6 +493,11 @@ Docker も WSL も使っていない。**SearXNG は Linux 前提だが、依存
 * SearXNG は常駐化していない（`searxng` バックエンド時、`start.bat` が都度起動する）
 * 年月の除去は正規表現。`(?:19|20)\d{2}` に限定しているが、
   `GPT-2024` のような命名があれば誤爆しうる
+* web の画面はモデルの切り替えが**プロセス全体に効く**（`agent.MODEL` がグローバル）。
+  生成は同時1本なので競合はしないが、**他の会話の既定も変わる**
+* web の画面の `thinking` は、ターンごとに1つにまとめて最後の assistant に付けている。
+  ラウンドごとに分けて持ってはいない
+* web の画面には認証が無い。127.0.0.1 に閉じていることだけが防御
 
 ## 配置と設定
 
@@ -466,6 +521,8 @@ Docker も WSL も使っていない。**SearXNG は Linux 前提だが、依存
 | `SEARXNG_URL` | `http://127.0.0.1:8888` |
 | `OLLAMA_HOST` | `http://localhost:11434` |
 | `OLLAMA_SEARCH_MODEL` | `hauhau-aggressive:iq2m` |
+| `WEBUI_PORT` | `4645`（埋まっていたら上に空きを探す） |
+| `WEBUI_DB` | `<このリポジトリ>/chats.sqlite`（`.gitignore` 済み） |
 
 `settings-local.yml` と `sitecustomize.py` と `start-searxng.ps1` は
 **SearXNG 側に配置する原本**（それぞれ checkout 直下と

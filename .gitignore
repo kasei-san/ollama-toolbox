@@ -10,3 +10,4 @@ ss.txt
 
 # API キー。絶対にコミットしない
 .env
+chats.sqlite

@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ollama-toolbox</title>
+<style>
+  /* 配色はブラウザ/OS のテーマに追従する。明示的なトグルは付けていない。 */
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --dim: #6b6b6b; --line: #e0e0e0;
+    --panel: #f7f7f7; --user: #eef3fb; --accent: #2b6cb0; --warn: #b0402b;
+    --code: #f0f0f0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17191c; --fg: #e6e6e6; --dim: #9aa0a6; --line: #2e3238;
+      --panel: #1e2126; --user: #22303f; --accent: #7ab3ea; --warn: #e08a72;
+      --code: #23262b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; background: var(--bg); color: var(--fg);
+    font: 15px/1.7 "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+  }
+  button, select, textarea, input { font: inherit; color: inherit; }
+  button {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 10px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  /* 幅は一番長いモデル名（hf.co/... の長いタグ）に引っ張られるので頭を押さえる */
+  select {
+    max-width: 240px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 6px;
+  }
+
+  /* --- 左: 会話ログの一覧 --- */
+  #side {
+    width: 240px; flex: none; border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; background: var(--panel);
+  }
+  #side header { padding: 10px; border-bottom: 1px solid var(--line); }
+  #chats { overflow-y: auto; flex: 1; }
+  .chat {
+    padding: 8px 10px; border-bottom: 1px solid var(--line); cursor: pointer;
+    display: flex; gap: 6px; align-items: baseline;
+  }
+  .chat:hover { background: var(--bg); }
+  .chat.sel { border-left: 3px solid var(--accent); padding-left: 7px; }
+  .chat .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat .d { font-size: 11px; color: var(--dim); flex: none; }
+  .chat .x { visibility: hidden; color: var(--dim); }
+  .chat:hover .x { visibility: visible; }
+
+  /* --- 右: 本体 --- */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #bar {
+    padding: 8px 12px; border-bottom: 1px solid var(--line);
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    font-size: 13px;
+  }
+  #bar .sp { flex: 1; }
+  #bar .meta { color: var(--dim); }
+  #sysbox { border-bottom: 1px solid var(--line); padding: 10px 12px; display: none; }
+  #sysbox textarea { width: 100%; min-height: 90px; resize: vertical;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px; }
+  #sysbox .note { color: var(--dim); font-size: 12px; margin: 6px 0; }
+  #log { flex: 1; overflow-y: auto; padding: 16px; }
+  #log > * { max-width: 860px; margin: 0 auto 14px; }
+  .msg { white-space: pre-wrap; word-break: break-word; }
+  .msg.user {
+    background: var(--user); border-radius: 8px; padding: 10px 12px;
+  }
+  .msg.error { color: var(--warn); }
+  .who { font-size: 12px; color: var(--dim); margin-bottom: 2px; }
+  details.aux {
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
+    font-size: 13px; background: var(--panel);
+  }
+  details.aux summary { cursor: pointer; color: var(--dim); }
+  details.aux pre {
+    white-space: pre-wrap; word-break: break-word; margin: 8px 0 0;
+    color: var(--dim); font: 12px/1.6 ui-monospace, Consolas, monospace;
+  }
+  .note { color: var(--dim); font-size: 12px; }
+  .hits { margin: 6px 0 0; padding-left: 18px; }
+  .hits li { margin-bottom: 4px; }
+  .hits a { color: var(--accent); }
+  #form { border-top: 1px solid var(--line); padding: 10px 12px; }
+  #form .row { max-width: 860px; margin: 0 auto; display: flex; gap: 8px; }
+  #q {
+    flex: 1; min-height: 48px; max-height: 200px; resize: vertical; padding: 8px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  }
+  #hint { max-width: 860px; margin: 6px auto 0; color: var(--dim); font-size: 12px; }
+  .empty { color: var(--dim); text-align: center; padding: 40px 0; }
+</style>
+</head>
+<body>
+<div id="side">
+  <header><button id="new">＋ 新しい会話</button></header>
+  <div id="chats"></div>
+</div>
+
+<div id="main">
+  <div id="bar">
+    <select id="model" title="このターンから使うモデル"></select>
+    <button id="think" class="on" title="思考の on / off">think</button>
+    <button id="force" title="毎回かならず検索する">force</button>
+    <button id="sysbtn">system</button>
+    <span class="sp"></span>
+    <span class="meta" id="meta"></span>
+  </div>
+
+  <div id="sysbox">
+    <textarea id="sys" placeholder="空にすると Modelfile に焼かれた SYSTEM が効く"></textarea>
+    <div class="note">
+      <strong>Modelfile の SYSTEM を置き換える</strong>（重ねるのではない）。
+      「クエリに年を足すな」という日付まわりの禁止も消えるので、要るなら書き足すこと。
+      空にすれば元に戻る。
+    </div>
+    <button id="syssave">保存</button>
+  </div>
+
+  <div id="log"></div>
+
+  <div id="form">
+    <div class="row">
+      <textarea id="q" placeholder="聞きたいことを書く（Enter で送信 / Shift+Enter で改行）"></textarea>
+      <button id="send">送信</button>
+    </div>
+    <div id="hint"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;   // 常に textContent。HTML は入れない
+  return n;
+};
+
+let state = { chatId: null, chats: [], think: true, force: false, busy: false };
+
+async function api(method, path, body) {
+  const r = await fetch(path, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+// --- 一覧 ----------------------------------------------------------------
+async function loadChats() {
+  state.chats = await api("GET", "/api/chats");
+  const box = $("#chats");
+  box.textContent = "";
+  for (const c of state.chats) {
+    const row = el("div", "chat" + (c.id === state.chatId ? " sel" : ""));
+    row.append(el("span", "t", c.title || "(無題)"),
+               el("span", "d", (c.updated_at || "").slice(5, 16)));
+    const x = el("span", "x", "✕");
+    x.title = "この会話を消す";
+    x.onclick = async ev => {
+      ev.stopPropagation();
+      if (!confirm("この会話を消す？ 元に戻せない。")) return;
+      await api("DELETE", "/api/chats/" + c.id);
+      if (state.chatId === c.id) { state.chatId = null; $("#log").textContent = ""; }
+      loadChats();
+    };
+    row.append(x);
+    row.onclick = () => openChat(c.id);
+    box.append(row);
+  }
+}
+
+async function newChat() {
+  const { id } = await api("POST", "/api/chats");
+  await loadChats();
+  openChat(id);
+}
+
+// --- 1つの会話 -----------------------------------------------------------
+async function openChat(id) {
+  state.chatId = id;
+  const chat = await api("GET", "/api/chats/" + id);
+  $("#sys").value = chat.system || "";
+  if (chat.model) $("#model").value = chat.model;
+  const log = $("#log");
+  log.textContent = "";
+  for (const m of chat.messages) renderStored(m);
+  if (!chat.messages.length) log.append(el("div", "empty", "まだ何も聞いていない"));
+  log.scrollTop = log.scrollHeight;
+  loadChats();
+}
+
+function renderStored(m) {
+  const log = $("#log");
+  if (m.role === "user") {
+    const b = el("div", "msg user", m.content);
+    log.append(b);
+    return;
+  }
+  if (m.role === "error") { log.append(el("div", "msg error", m.content)); return; }
+  if (m.role === "tool") {
+    log.append(auxBlock("検索結果 (" + (m.tool_name || "tool") + ")", m.content));
+    return;
+  }
+  // assistant
+  if (m.tool_calls) {
+    for (const c of JSON.parse(m.tool_calls)) {
+      log.append(el("div", "note",
+        "→ " + c.function.name + " " + JSON.stringify(c.function.arguments)));
+    }
+  }
+  if (m.thinking) log.append(auxBlock("思考", m.thinking));
+  if (m.content) {
+    const wrap = el("div");
+    wrap.append(el("div", "who", "assistant"), el("div", "msg", m.content));
+    log.append(wrap);
+  }
+}
+
+function auxBlock(label, text) {
+  const d = el("details", "aux");
+  d.append(el("summary", null, label));
+  d.append(el("pre", null, text));
+  return d;
+}
+
+// --- 送信 ----------------------------------------------------------------
+async function send() {
+  const q = $("#q").value.trim();
+  if (!q || state.busy) return;
+  if (!state.chatId) await newChat();
+  const log = $("#log");
+  log.querySelector(".empty")?.remove();
+  log.append(el("div", "msg user", q));
+  $("#q").value = "";
+  state.busy = true;
+  $("#send").disabled = true;
+  $("#hint").textContent = "考えている…";
+
+  // 進捗の入れ物。届いた端から差し替える。
+  let think = null, answerBox = null, answerText = "";
+
+  const r = await fetch("/api/chats/" + state.chatId + "/ask", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question: q, force: state.force, think: state.think,
+                           model: $("#model").value }),
+  });
+  if (!r.ok || !r.body) {
+    const e = await r.json().catch(() => ({}));
+    log.append(el("div", "msg error", e.error || ("HTTP " + r.status)));
+    return finish();
+  }
+
+  const reader = r.body.getReader(), dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    // SSE は空行区切り。届く単位はイベント境界と一致しないので自分で切る。
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const line = buf.slice(0, i).replace(/^data: /, "");
+      buf = buf.slice(i + 2);
+      if (!line) continue;
+      const { kind, payload } = JSON.parse(line);
+      if (kind === "think") {
+        if (!think) { think = auxBlock("思考", ""); think.open = true; log.append(think); }
+        think.querySelector("pre").textContent += payload;
+      } else if (kind === "content") {
+        if (!answerBox) {
+          const wrap = el("div");
+          answerBox = el("div", "msg");
+          wrap.append(el("div", "who", "assistant"), answerBox);
+          log.append(wrap);
+        }
+        answerText += payload;
+        answerBox.textContent = answerText;
+      } else if (kind === "tool") {
+        if (think) think.open = false;
+        log.append(el("div", "note",
+          "→ " + payload.name + " " + JSON.stringify(payload.args)));
+      } else if (kind === "result") {
+        log.append(hitsBlock(payload.result));
+      } else if (kind === "note") {
+        log.append(el("div", "note", "· " + payload));
+      } else if (kind === "failed") {
+        log.append(el("div", "msg error", "検索に失敗した: " + payload));
+      } else if (kind === "done") {
+        if (think) think.open = false;
+        // ストリームの取りこぼしがあっても最終的な答えに揃える
+        if (answerBox) answerBox.textContent = payload.answer;
+        loadChats();
+      }
+      log.scrollTop = log.scrollHeight;
+    }
+  }
+  finish();
+
+  function finish() {
+    state.busy = false;
+    $("#send").disabled = false;
+    $("#hint").textContent = "";
+    $("#q").focus();
+  }
+}
+
+function hitsBlock(res) {
+  // web_search は results[]、web_fetch は text。それ以外は生で見せる。
+  if (res && Array.isArray(res.results)) {
+    const d = el("details", "aux");
+    d.append(el("summary", null, "検索結果 " + res.results.length + "件: " + (res.query || "")));
+    const ul = el("ul", "hits");
+    for (const h of res.results) {
+      const li = el("li");
+      const a = el("a", null, h.title || h.url);
+      a.href = h.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+      li.append(a, el("div", "note", h.content || ""));
+      ul.append(li);
+    }
+    d.append(ul);
+    return d;
+  }
+  if (res && res.text !== undefined) {
+    return auxBlock("取得: " + (res.url || ""), res.text);
+  }
+  return auxBlock("結果", JSON.stringify(res, null, 2));
+}
+
+// --- 立ち上げ ------------------------------------------------------------
+(async function init() {
+  const s = await api("GET", "/api/state");
+  $("#meta").textContent =
+    `backend=${s.backend}  safesearch=${s.safesearch}  num_ctx=${s.num_ctx}`;
+  const sel = $("#model");
+  for (const m of s.models) sel.append(new Option(m, m));
+  sel.value = s.model;
+
+  $("#new").onclick = newChat;
+  $("#send").onclick = send;
+  $("#think").onclick = e => { state.think = !state.think; e.target.classList.toggle("on", state.think); };
+  $("#force").onclick = e => { state.force = !state.force; e.target.classList.toggle("on", state.force); };
+  $("#sysbtn").onclick = () => {
+    const b = $("#sysbox");
+    b.style.display = b.style.display === "block" ? "none" : "block";
+  };
+  $("#syssave").onclick = async () => {
+    if (!state.chatId) await newChat();
+    await api("PATCH", "/api/chats/" + state.chatId, { system: $("#sys").value });
+    $("#sysbox").style.display = "none";
+  };
+  $("#q").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  });
+
+  await loadChats();
+  if (state.chats.length) openChat(state.chats[0].id);
+  $("#q").focus();
+})();
+</script>
+</body>
+</html>
