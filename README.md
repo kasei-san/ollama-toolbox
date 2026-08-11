@@ -108,8 +108,32 @@ Docker も WSL も使っていない。**SearXNG は Linux 前提だが、依存
    `git pull` で壊れるので venv 側に置く
 
 **JSON 出力は既定で無効。** `settings-local.yml` の `search.formats` で有効化している。
-`startpage` は CAPTCHA、`brave` は rate limit、`wikidata` は 403 で落ちることがあるが、
-他のエンジンで結果は返る。
+
+### 実際に使われている検索エンジン（2026-08-11 実測）
+
+`use_default_settings: true` なので general カテゴリの **61エンジンすべてが叩かれる**が、
+**実際に結果を返しているのは2つだけ**。3クエリ80件の内訳:
+
+| エンジン | 寄与した結果数 |
+|---|---|
+| **google cse** | 60 |
+| **brave** | 20 |
+| その他59個 | 0 |
+
+明示的に落ちるもの: `duckduckgo` は **CAPTCHA（3/3回）**、`startpage` も CAPTCHA（3/3）、
+`brave` は too many requests（3回中2回）。
+
+61個のうち `dictzone`（辞書）`currency`（為替）`lingva`/`mozhi`（翻訳）`tineye`（画像逆引き）
+`wikiquote`/`wikisource` などは **general カテゴリだが普通の web 検索ではない**ので、
+0件なのが正常。残る本来の検索エンジン（bing, mojeek, qwant, yandex, yahoo, seznam, yep 等）が
+**エラーも出さず0件**な理由は**未検証**。
+
+**結果の75%が google cse 1本に依存しており、実質シングルポイント。**
+「検索結果が0件」で打ち切られる事象はこの脆さが原因と思われる。頻発するなら:
+
+* bing / mojeek が無言で0件な理由を調べて直す
+* `settings-local.yml` の `engines:` で**動くエンジンだけに絞る**（無駄な待ちが減り速くもなる）
+* Brave Search API のキーを取ってレート制限を回避する
 
 ## `start.bat` を書いていて踏んだ罠
 
