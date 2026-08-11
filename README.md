@@ -3,6 +3,12 @@
 ローカルの Ollama モデルに tool を持たせる道具箱。今は web 検索。
 Windows 10 + RTX 5060 Ti 16GB で構築。
 
+**セットアップ（Ollama とモデルの導入）は [`docs/setup.md`](docs/setup.md)。**
+まっさらな Windows 機からここまで持っていける手順を、
+人間が読んでもエージェントが実行してもいいように書いてある。
+
+このリポジトリ自体の依存は1つだけ:
+
 ```
 pip install -r requirements.txt
 ```
