@@ -1,0 +1,35 @@
+# ローカルLLM 用の SearXNG 設定。
+# リポジトリ本体（searx/settings.yml）は触らず、これを SEARXNG_SETTINGS_PATH で指す。
+# 既定値を継承して差分だけ書く。
+use_default_settings: true
+
+general:
+  instance_name: "local"
+  # 検索以外の機能を切って軽くする
+  enable_metrics: false
+
+server:
+  bind_address: "127.0.0.1"
+  port: 8888
+  # ローカル専用なので固定値でよい。外に出す用途では作り直すこと。
+  secret_key: "local-only-not-a-shared-instance"
+  limiter: false
+  public_instance: false
+  image_proxy: false
+
+search:
+  # ← これが本題。既定は html のみで JSON が返らない
+  formats:
+    - html
+    - json
+  safe_search: 0
+  autocomplete: ""
+
+ui:
+  static_use_hash: true
+
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 12.0
+  pool_connections: 20
+  pool_maxsize: 10
