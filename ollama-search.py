@@ -49,6 +49,14 @@ class SearchFailed(Exception):
     """検索が失敗した。モデルに記憶で答えさせないため、ここで打ち切る。"""
 
 
+class OllamaFailed(Exception):
+    """Ollama がリクエストを受け付けなかった。**検索の失敗とは別物。**
+
+    一緒くたにすると「検索に失敗した」と表示されて、VRAM 不足やモデルの
+    打ち間違いを検索の問題だと思って調べ始めることになる（実際やった）。
+    """
+
+
 def _load_dotenv():
     """隣の .env を読む。**既存の環境変数は上書きしない**（そちらが優先）。
 
@@ -359,6 +367,29 @@ class Conversation:
                          f"(予算 {budget})")
 
 
+def _ollama_error(e):
+    """`HTTPError` から**読める理由**を作る。
+
+    `str(HTTPError)` は `HTTP Error 500: Internal Server Error` までしか言わない。
+    **理由は本文にある**（VRAM 不足、モデル名の打ち間違い、等）。読まずに投げると、
+    500 という数字だけを見て検索やネットワークを疑うことになる。
+    """
+    try:
+        detail = (json.loads(e.read().decode("utf-8", "replace"))
+                  or {}).get("error", "")
+    except Exception:                                       # noqa: BLE001
+        detail = ""
+    msg = f"Ollama が HTTP {e.code} を返した: {detail or e.reason}"
+    if "out of memory" in detail or "cudaMalloc" in detail:
+        # このマシンで実際に踏む。空き VRAM を測らずに「モデルが壊れた」と
+        # 判断しないための道しるべ。
+        msg += ("\n  VRAM が足りない。空きは `nvidia-smi` で見る。"
+                "\n  他のアプリを閉じるか、num_ctx の小さいモデルに切り替えること。")
+    elif "not found" in detail.lower():
+        msg += "\n  モデル名を確認すること（`ollama list`）。"
+    return msg
+
+
 def post(url, payload, headers, timeout):
     req = urllib.request.Request(
         url, json.dumps(payload).encode("utf-8"),
@@ -386,7 +417,14 @@ def ollama_chat(messages, tools=TOOLS, think=False, emit=noop_emitter, usage=Non
         {"Content-Type": "application/json"})
 
     content, thinking, tool_calls = [], [], []
-    with urllib.request.urlopen(req, timeout=900) as r:
+    try:
+        conn = urllib.request.urlopen(req, timeout=900)
+    except urllib.error.HTTPError as e:
+        raise OllamaFailed(_ollama_error(e)) from None
+    except urllib.error.URLError as e:
+        raise OllamaFailed(f"Ollama ({OLLAMA}) に繋がらない: {e.reason}。"
+                           f"start.bat か webui.bat から起動すること。") from None
+    with conn as r:
         for raw in r:
             raw = raw.strip()
             if not raw:
@@ -728,6 +766,9 @@ class Repl:
                       self.verbose, self.think))
         except SearchFailed as e:
             print(f"検索に失敗した: {e}", file=sys.stderr)
+        except OllamaFailed as e:
+            # 対話モードは落とさない。モデルを切り替えれば続けられる。
+            print(f"{e}", file=sys.stderr)
 
     # -- コマンド ----------------------------------------------------------
     #   docstring の1行目がそのまま /help の説明になる。
@@ -840,6 +881,9 @@ def main():
             print(ask(" ".join(a.question), None, a.force, not a.quiet, a.think))
         except SearchFailed as e:
             print(f"検索に失敗した: {e}", file=sys.stderr)
+            sys.exit(1)
+        except OllamaFailed as e:
+            print(f"{e}", file=sys.stderr)
             sys.exit(1)
         return
 

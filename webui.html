@@ -299,8 +299,10 @@ async function send() {
         log.append(hitsBlock(payload.result));
       } else if (kind === "note") {
         log.append(el("div", "note", "· " + payload));
-      } else if (kind === "failed") {
-        log.append(el("div", "msg error", "検索に失敗した: " + payload));
+      } else if (kind === "error") {
+        // サーバ側で既に「何に失敗したか」を書いてある。ここで decorate しない
+        // ——「検索に失敗した」と一律に被せると、VRAM 不足まで検索のせいに見える。
+        log.append(el("div", "msg error", payload));
       } else if (kind === "done") {
         if (think) think.open = false;
         // ストリームの取りこぼしがあっても最終的な答えに揃える

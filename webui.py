@@ -333,20 +333,23 @@ class Handler(BaseHTTPRequestHandler):
                 state["think"].append(payload)
             sse(kind, payload)
 
+        def fail(text):
+            """失敗を記録して伝える。**次の文脈には入らない**（role='error'）。"""
+            save_message(chat["id"], turn, 1, {"role": "error", "content": text})
+            sse("error", text)
+
         conv = load_conversation(chat)
         try:
             answer = agent.ask(question, conv, force, True, think, emit)
         except agent.SearchFailed as e:
-            # 検索の失敗は握り潰さない（CLI と同じ）。記録は残すが、
-            # role='error' なので次の文脈には入らない。
-            save_message(chat["id"], turn, 1,
-                         {"role": "error", "content": f"検索に失敗した: {e}"})
-            return sse("failed", str(e))
+            # 検索の失敗は握り潰さない（CLI と同じ）
+            return fail(f"検索に失敗した: {e}")
+        except agent.OllamaFailed as e:
+            # **検索の失敗と混ぜない。** 混ぜると VRAM 不足やモデルの打ち間違いを
+            # 「検索に失敗した」と表示することになり、見当違いの場所を調べ始める。
+            return fail(str(e))
         except Exception as e:                              # noqa: BLE001
-            save_message(chat["id"], turn, 1,
-                         {"role": "error",
-                          "content": f"{type(e).__name__}: {e}"})
-            return sse("failed", f"{type(e).__name__}: {e}")
+            return fail(f"{type(e).__name__}: {e}")
 
         # ask() が積んだターンをそのまま保存する。先頭は今保存した user なので飛ばす。
         # thinking は表示用にターンごと1つにまとめて最後の assistant に付ける
