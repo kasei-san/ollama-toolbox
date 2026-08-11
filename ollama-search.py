@@ -61,6 +61,24 @@ BACKEND = os.environ.get("SEARCH_BACKEND", "ddgs").lower()
 # "auto" にすると ddgs が勝手に選ぶ。明示した方が挙動が読めるので既定は明示。
 DDGS_BACKEND = os.environ.get("DDGS_BACKEND", "bing,brave,yandex")
 
+# セーフサーチ。**バックエンドごとに語彙が違う**ので、ここで正準語を決めて変換する:
+#   このツール : off / moderate / strict
+#   ddgs      : off / moderate / on      ← 最も厳しいのが "on"。"strict" は無効値
+#   SearXNG   : 0   / 1        / 2
+# ddgs に "strict" を渡しても例外にならず素通しされるだけなので、
+# **無効値は黙って通る**。だから受け取った時点で検証して落とす。
+SAFESEARCH_MAP = {
+    "off":      {"ddgs": "off",      "searxng": 0},
+    "moderate": {"ddgs": "moderate", "searxng": 1},
+    "strict":   {"ddgs": "on",       "searxng": 2},
+}
+SAFESEARCH = os.environ.get("SEARCH_SAFESEARCH", "off").strip().lower()
+if SAFESEARCH not in SAFESEARCH_MAP:
+    # 黙って既定に戻すと、`stict` のようなタイポで「厳しくしたつもりが素通し」に
+    # なる。安全側に倒れないフォールバックはしない。
+    sys.exit(f"SEARCH_SAFESEARCH={SAFESEARCH!r} は無効。"
+             f"{'/'.join(SAFESEARCH_MAP)} のいずれかを指定すること。")
+
 TOOLS = [
     {"type": "function", "function": {
         "name": "web_search",
@@ -146,10 +164,12 @@ def ddgs_search(query, max_results):
         return {"error": "ddgs が入っていない。`pip install -r requirements.txt` するか、"
                          "SEARCH_BACKEND=searxng に切り替えること。"}
     try:
-        hits = DDGS().text(query, max_results=max_results, backend=DDGS_BACKEND)
+        hits = DDGS().text(query, max_results=max_results, backend=DDGS_BACKEND,
+                           safesearch=SAFESEARCH_MAP[SAFESEARCH]["ddgs"])
     except Exception as e:                                  # noqa: BLE001
         # ddgs は0件も例外で投げてくる（DDGSException: No results found）
-        return {"error": f"ddgs 検索に失敗 ({DDGS_BACKEND}): {type(e).__name__}: {e}"}
+        return {"error": f"ddgs 検索に失敗 (backend={DDGS_BACKEND}, "
+                         f"safesearch={SAFESEARCH}): {type(e).__name__}: {e}"}
     if not hits:
         return {"error": f"'{query}' の検索結果が 0 件 (backend={DDGS_BACKEND})"}
     return {"query": query,
@@ -161,7 +181,8 @@ def ddgs_search(query, max_results):
 def searxng_search(query, max_results):
     """ローカル SearXNG の JSON API を叩く。"""
     url = f"{SEARXNG}/search?" + urllib.parse.urlencode(
-        {"q": query, "format": "json", "safesearch": 0})
+        {"q": query, "format": "json",
+         "safesearch": SAFESEARCH_MAP[SAFESEARCH]["searxng"]})
     try:
         with urllib.request.urlopen(url, timeout=45) as r:
             data = json.loads(r.read().decode("utf-8"))

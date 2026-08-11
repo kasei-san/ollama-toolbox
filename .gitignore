@@ -5,3 +5,5 @@ __pycache__/
 ddgs_test.txt
 eng_test.txt
 multi.txt
+ss.txt
+*.tmp
