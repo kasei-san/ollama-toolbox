@@ -270,6 +270,10 @@ class Conversation:
 
         見積もりは所詮 文字数 ÷ 係数 なので、**実測が取れるならそちらに寄せる。**
         極端な値で暴れないよう範囲で挟む。
+
+        `prompt_tokens` にはツール定義（毎回送られる。約200トークン）が含まれるが
+        `chars` には無いので、係数は本来より小さめに出る。つまり見積もりは
+        **多めに出る**。早めに削る方向なので、ズレるならこちらで構わない。
         """
         if not self._ctx_confirmed:
             self._ctx_confirmed = True
@@ -594,6 +598,190 @@ def ask(question, conv=None, force=False, verbose=True, think=True):
     return msg.get("content", "")
 
 
+def model_exists(name):
+    """そのモデルが Ollama にあるか。**確認できなければ None**（False ではない）。
+
+    Ollama が落ちているだけのときに「無い」と言い切ると、
+    直せるはずの状況で切り替えを拒否することになる。区別する。
+    """
+    try:
+        with urllib.request.urlopen(f"{OLLAMA}/api/tags", timeout=15) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:                                       # noqa: BLE001
+        return None
+    return any(m.get("name") == name for m in data.get("models") or [])
+
+
+def modelfile_system(model=None):
+    """Modelfile に焼かれた SYSTEM。`/system` 未設定のとき効いているのはこれ。"""
+    try:
+        return (post(f"{OLLAMA}/api/show", {"model": model or MODEL}, {}, 30)
+                .get("system") or "")
+    except Exception:                                       # noqa: BLE001
+        return ""
+
+
+def _onoff(rest, current):
+    """`on` / `off` / 空（トグル）を解釈する。それ以外は ValueError。"""
+    rest = rest.strip().lower()
+    if not rest:
+        return not current
+    if rest in ("on", "yes", "true", "1"):
+        return True
+    if rest in ("off", "no", "false", "0"):
+        return False
+    raise ValueError(f"on / off のどちらかを指定すること（受け取ったのは {rest!r}）")
+
+
+class Repl:
+    """対話モードの状態と、行頭 `/` のコマンド。
+
+    **未知のコマンドはモデルに送らない。** `/claer` のようなタイポが黙って質問として
+    流れると、推論が1回無駄になるうえ「なぜ効かないのか」が分からない。
+    知らないものは知らないと言って止める。
+
+    コマンドの出力は全部 stderr。答え（stdout）と混ぜないという既存の方針に合わせる。
+    """
+
+    ALIASES = {"?": "help", "h": "help", "q": "exit", "quit": "exit",
+               "reset": "clear", "sys": "system", "hist": "history"}
+
+    def __init__(self, args):
+        self.conv = Conversation()
+        self.force = args.force
+        self.think = args.think
+        self.verbose = not args.quiet
+        self.done = False
+
+    # -- 入口 --------------------------------------------------------------
+    def handle(self, line):
+        """1行を処理する。コマンドなら実行、そうでなければモデルに投げる。"""
+        # 行頭 '//' は '/' 1つのエスケープ。'/' で始まる文章を本当に送りたいとき用。
+        if line.startswith("//"):
+            return self.query(line[1:])
+        if line.startswith("/"):
+            return self.command(line)
+        # 昔からある終了語。指が覚えているものを取り上げる理由がない。
+        if line.lower() in ("exit", "quit", ":q", ":wq", "終了", "おわり"):
+            self.done = True
+            return
+        return self.query(line)
+
+    def command(self, line):
+        name, _, rest = line[1:].partition(" ")
+        name = name.strip().lower()
+        fn = getattr(self, "cmd_" + self.ALIASES.get(name, name), None)
+        if not fn:
+            print(f"  知らないコマンド: /{name}   （/help で一覧。"
+                  f"'/' で始まる文章を送りたいなら '//' で始める）", file=sys.stderr)
+            return
+        try:
+            fn(rest.strip())
+        except ValueError as e:
+            print(f"  {e}", file=sys.stderr)
+
+    def query(self, question):
+        force = self.force or question.startswith("!")
+        try:
+            print(ask(question.lstrip("!").strip(), self.conv, force,
+                      self.verbose, self.think))
+        except SearchFailed as e:
+            print(f"検索に失敗した: {e}", file=sys.stderr)
+
+    # -- コマンド ----------------------------------------------------------
+    #   docstring の1行目がそのまま /help の説明になる。
+    def cmd_help(self, rest):
+        """コマンド一覧"""
+        print("  コマンド:", file=sys.stderr)
+        for n in sorted(x[4:] for x in dir(self) if x.startswith("cmd_")):
+            doc = (getattr(self, "cmd_" + n).__doc__ or "").splitlines()[0]
+            print(f"    /{n:<8} {doc}", file=sys.stderr)
+        print("  そのほか:", file=sys.stderr)
+        print("    行頭 '!'  その1問だけ検索を強制", file=sys.stderr)
+        print("    行頭 '//' '/' で始まる文章をそのまま送る", file=sys.stderr)
+        print("    exit / quit / 終了 / おわり / :q / Ctrl-C  で抜ける",
+              file=sys.stderr)
+
+    def cmd_clear(self, rest):
+        """会話履歴を捨てる（システムプロンプトとモデルはそのまま）"""
+        print(f"  履歴を捨てた（{self.conv.clear()}ターン）", file=sys.stderr)
+
+    def cmd_history(self, rest):
+        """今積んでいる履歴を見る"""
+        c = self.conv
+        if not c.turns:
+            print("  履歴は空", file=sys.stderr)
+        for i, t in enumerate(c.turns, 1):
+            first = next((m.get("content", "") for m in t
+                          if m.get("role") == "user"), "")
+            last = next((m.get("content", "") for m in reversed(t)
+                         if m.get("role") == "assistant" and m.get("content")), "")
+            tools = sum(1 for m in t if m.get("role") == "tool")
+            mark = f" (検索結果 {tools}件)" if tools else ""
+            print(f"  {i}. > {first[:60]}{mark}", file=sys.stderr)
+            print(f"     < {last[:60]}", file=sys.stderr)
+        # 見積もりは履歴だけ、実測はツール定義と今の質問も含む**別のもの**。
+        # 並べると同じ量に見えるので、何を数えたか書いておく。
+        measured = (f", 直近の実測 {c.measured_tokens}トークン"
+                    f"（ツール定義と質問込み）" if c.measured_tokens else "")
+        print(f"  約{c.est_tokens()}トークン / 予算 {c.budget()} "
+              f"(num_ctx {c.num_ctx}){measured}", file=sys.stderr)
+
+    def cmd_system(self, rest):
+        """システムプロンプトの表示・設定・解除（/system reset で解除）"""
+        if not rest:
+            if self.conv.system is None:
+                baked = modelfile_system()
+                print("  未設定。Modelfile に焼かれた SYSTEM が効いている:",
+                      file=sys.stderr)
+                print(f"    {baked or '(空)'}", file=sys.stderr)
+            else:
+                print(f"  {self.conv.system}", file=sys.stderr)
+            return
+        if rest.lower() == "reset":
+            self.conv.system = None
+            print("  解除した。Modelfile の SYSTEM に戻る", file=sys.stderr)
+            return
+        # **Modelfile の SYSTEM を置き換える**（重ねるのではない）。
+        # 日付まわりの禁止もこれで消えるので、必要なら書き足すこと。
+        self.conv.system = rest
+        print("  設定した。**Modelfile の SYSTEM は置き換わる**"
+              "（日付まわりの禁止も消える）", file=sys.stderr)
+
+    def cmd_model(self, rest):
+        """モデルの表示・切り替え"""
+        global MODEL
+        if not rest:
+            print(f"  {MODEL}  (num_ctx {self.conv.num_ctx})", file=sys.stderr)
+            return
+        exists = model_exists(rest)
+        if exists is False:
+            raise ValueError(f"{rest!r} は Ollama に無い（ollama list で確認）")
+        if exists is None:
+            print("  警告: Ollama に繋がらずモデルの存在を確認できなかった",
+                  file=sys.stderr)
+        MODEL = rest
+        # num_ctx はモデルごとに違う。**引き直さないと予算が前のモデルのままになる。**
+        self.conv.num_ctx = detect_num_ctx()
+        self.conv._ctx_confirmed = False
+        print(f"  {MODEL} に切り替えた (num_ctx {self.conv.num_ctx})。"
+              f"履歴はそのまま（捨てるなら /clear）", file=sys.stderr)
+
+    def cmd_think(self, rest):
+        """思考の on / off（速さと精度のトレードオフ）"""
+        self.think = _onoff(rest, self.think)
+        print(f"  think = {'on' if self.think else 'off'}", file=sys.stderr)
+
+    def cmd_force(self, rest):
+        """検索強制を常時 on / off にする（1問だけなら行頭 '!'）"""
+        self.force = _onoff(rest, self.force)
+        print(f"  force = {'on' if self.force else 'off'}", file=sys.stderr)
+
+    def cmd_exit(self, rest):
+        """抜ける"""
+        self.done = True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("question", nargs="*")
@@ -614,26 +802,19 @@ def main():
             sys.exit(1)
         return
 
-    conv = Conversation()
-    print(f"model={MODEL}  num_ctx={conv.num_ctx}"
-          f" (履歴の予算 {conv.budget()}トークン)", file=sys.stderr)
-    print("  exit / quit / 終了 または Ctrl-C で抜ける", file=sys.stderr)
-    print("  行頭 '!' で検索を強制", file=sys.stderr)
-    while True:
+    repl = Repl(a)
+    print(f"model={MODEL}  num_ctx={repl.conv.num_ctx}"
+          f" (履歴の予算 {repl.conv.budget()}トークン)", file=sys.stderr)
+    print("  /help でコマンド一覧。exit / quit / 終了 / Ctrl-C で抜ける",
+          file=sys.stderr)
+    while not repl.done:
         try:
-            q = input("> ").strip()
+            line = input("> ").strip()
         except (EOFError, KeyboardInterrupt):
             print(file=sys.stderr)
             return
-        if not q:
-            continue
-        if q.lower() in ("exit", "quit", ":q", ":wq", "終了", "おわり"):
-            return
-        force = a.force or q.startswith("!")
-        try:
-            print(ask(q.lstrip("!").strip(), conv, force, not a.quiet, a.think))
-        except SearchFailed as e:
-            print(f"検索に失敗した: {e}", file=sys.stderr)
+        if line:
+            repl.handle(line)
 
 
 if __name__ == "__main__":
