@@ -11,16 +11,20 @@ REM  both answer, then hands over to ollama-search.py.
 REM
 REM  NOTE: this file is deliberately pure ASCII.  cmd.exe reads .bat as the OEM
 REM  code page (cp932 here), so non-ASCII text in the source would be mangled.
-REM  Japanese output is left to the Python side, which handles UTF-8 properly.
-REM  See ~/.claude/docs/windows-shell.md
+REM  Non-ASCII output is left to the Python side, which handles UTF-8 properly.
 REM ---------------------------------------------------------------------------
 setlocal
 chcp 65001 >nul
 
 set "HERE=%~dp0"
-set "SEARXNG_DIR=E:\llm\searxng"
-set "OLLAMA_URL=http://localhost:11434/api/tags"
-set "SEARXNG_URL=http://127.0.0.1:8888/"
+REM  Defaults assume SearXNG sits next to this checkout:
+REM      <parent>\searxng
+REM      <parent>\ollama-search   <- you are here
+REM  Override with the SEARXNG_DIR / SEARXNG_URL / OLLAMA_HOST env vars.
+if not defined SEARXNG_DIR set "SEARXNG_DIR=%HERE%..\searxng"
+if not defined SEARXNG_URL set "SEARXNG_URL=http://127.0.0.1:8888/"
+if not defined OLLAMA_HOST set "OLLAMA_HOST=http://localhost:11434"
+set "OLLAMA_URL=%OLLAMA_HOST%/api/tags"
 
 REM --- 1/2  Ollama -----------------------------------------------------------
 curl -s -m 3 -o nul "%OLLAMA_URL%"
@@ -29,13 +33,13 @@ if not errorlevel 1 (
     goto :searxng
 )
 echo [1/2] Ollama    : starting...
-REM  Normally this comes from the user environment variable, but if this .bat is
-REM  launched from a shell that predates it being set, Ollama silently falls back
-REM  to its default model dir and "ollama list" comes up EMPTY -- every request
-REM  then 404s with "model not found".  Pin it so the launcher is self-contained.
-if not defined OLLAMA_MODELS set "OLLAMA_MODELS=E:\llm\ollama"
-REM  %LOCALAPPDATA% on purpose: the home path is Japanese and gets mangled when
-REM  passed literally.  See ~/.claude/docs/windows-shell.md
+REM  If you keep your models outside Ollama's default location, set OLLAMA_MODELS
+REM  as a user environment variable.  Watch out: when this .bat is launched from a
+REM  shell that predates that variable being set, Ollama silently falls back to its
+REM  default model dir, "ollama list" comes up EMPTY, and every request then 404s
+REM  with "model not found".
+REM  %LOCALAPPDATA% is used on purpose rather than a literal path: a non-ASCII
+REM  user name gets mangled when passed literally through some shells.
 start "" "%LOCALAPPDATA%\Programs\Ollama\ollama app.exe"
 call :waitfor "%OLLAMA_URL%" 30 Ollama || goto :fail
 
@@ -48,7 +52,7 @@ if not errorlevel 1 (
 )
 if not exist "%SEARXNG_DIR%\.venv\Scripts\python.exe" (
     echo ERROR: SearXNG venv not found at %SEARXNG_DIR%
-    echo        See ~/.claude/docs/local-llm.md for the setup.
+    echo        See README.md for the setup.
     goto :fail
 )
 echo [2/2] SearXNG   : starting...

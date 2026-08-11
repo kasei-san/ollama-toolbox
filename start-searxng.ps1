@@ -1,11 +1,11 @@
 # ローカル LLM 用の SearXNG を起動する。
 #
-#   powershell -NoProfile -File E:\llm\searxng\start-searxng.ps1
+#   powershell -NoProfile -File <searxng-checkout>\start-searxng.ps1
 #
 # 既定で http://127.0.0.1:8888 に bind する（localhost 専用。外には出さない）。
 # 設定は settings-local.yml。JSON 出力はそこで有効化してある。
 #
-# Windows で動かすために2つ細工がある。詳細は ~/.claude/docs/local-llm.md:
+# Windows で動かすために2つ細工がある。詳細は ollama-search の README:
 #   1. utils/templates/ を sparse-checkout で除外（ファイル名に ':' があり NTFS で作れない）
 #   2. .venv/Lib/site-packages/sitecustomize.py で Unix API（pwd / os.getuid）を補う
 

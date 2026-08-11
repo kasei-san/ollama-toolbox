@@ -9,14 +9,12 @@
 思考の中身は stderr にリアルタイムで流す。答えは stdout なので、
 `... 2>nul` で思考だけ捨てられるし、`... >out.txt` で答えだけ拾える。
 
-前提: ローカルの SearXNG が起動していること。
-
-  E:\\llm\\searxng\\start-searxng.ps1
+前提: ローカルの SearXNG が起動していること（`start.bat` が面倒を見る）。
 
 検索バックエンドに ollama.com ではなく自前の SearXNG を使うのは**プライバシーのため**。
 ollama.com の web search API は無料で手軽だが、検索クエリが ollama.com に送られる。
 モデルの推論は元々ローカル完結なので、外に出るのは「何を検索したか」だけだが、
-それも出したくないという判断（issue #30）。
+それも出したくないという判断。
 
 なぜ強制オプションがあるか:
   「日本の首相は？」のような質問で、モデルは4〜6割の確率で検索せず記憶から答える
@@ -134,7 +132,7 @@ def searxng_search(query, max_results):
             data = json.loads(r.read().decode("utf-8"))
     except urllib.error.URLError as e:
         return {"error": f"SearXNG ({SEARXNG}) に繋がらない: {e.reason}。"
-                         f"E:\\llm\\searxng\\start-searxng.ps1 で起動すること。"}
+                         f"start.bat から起動するか、SEARXNG_URL を設定すること。"}
     except Exception as e:                                  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
 

@@ -11,8 +11,11 @@ general:
 server:
   bind_address: "127.0.0.1"
   port: 8888
-  # ローカル専用なので固定値でよい。外に出す用途では作り直すこと。
-  secret_key: "local-only-not-a-shared-instance"
+  # 127.0.0.1 に bind した個人用インスタンス前提の固定値。
+  # **LAN や外に出すなら必ず作り直すこと。** この値は公開リポジトリに載っているので、
+  # そのまま使うと「誰でも知っている鍵」になる。
+  #   python -c "import secrets; print(secrets.token_hex(32))"
+  secret_key: "CHANGE-ME-local-only-not-a-shared-instance"
   limiter: false
   public_instance: false
   image_proxy: false

@@ -48,9 +48,9 @@ RAM は無視できるが **VRAM は無視できない**。**Forge や ComfyUI �
 | `start.bat` | 入口。起動と待機 |
 | `stop.bat` | VRAM 解放と SearXNG 停止。`/all` で Ollama も |
 | `ollama-search.py` | エージェント本体。標準ライブラリのみ |
-| `settings-local.yml` | SearXNG 設定。**`E:\llm\searxng\` に置く原本** |
-| `sitecustomize.py` | Unix API シム。**`E:\llm\searxng\.venv\Lib\site-packages\` に置く原本** |
-| `start-searxng.ps1` | SearXNG 単体起動。**`E:\llm\searxng\` に置く原本** |
+| `settings-local.yml` | SearXNG 設定。**SearXNG の checkout 直下に置く原本** |
+| `sitecustomize.py` | Unix API シム。**SearXNG の `.venv/Lib/site-packages/` に置く原本** |
+| `start-searxng.ps1` | SearXNG 単体起動。**SearXNG の checkout 直下に置く原本** |
 
 モデルは `hauhau-aggressive:iq2m`（Qwen3.6-35B-A3B Uncensored / IQ2_M、
 `num_ctx 40960` と日付まわりの SYSTEM を焼いた別名）。
@@ -95,8 +95,11 @@ Docker も WSL も使っていない。**SearXNG は Linux 前提だが、依存
    （`searxng.conf:socket`）NTFS で作れず、**clone がツリー全体ごと失敗する**:
 
    ```sh
-   git clone --depth 1 https://github.com/searxng/searxng.git E:/llm/searxng
-   cd E:/llm/searxng
+   # このリポジトリと並べて置くと start.bat が既定で見つける
+   #   <親>/searxng
+   #   <親>/ollama-search
+   git clone --depth 1 https://github.com/searxng/searxng.git ../searxng
+   cd ../searxng
    git sparse-checkout set --no-cone '/*' '!/utils/templates/*'
    git checkout -- .
    python -m venv .venv
@@ -161,8 +164,29 @@ Docker も WSL も使っていない。**SearXNG は Linux 前提だが、依存
 * 年月の除去は正規表現。`(?:19|20)\d{2}` に限定しているが、
   `GPT-2024` のような命名があれば誤爆しうる
 
-## 関連
+## 配置と設定
 
-* 実測値・経緯: https://github.com/kasei-san/dot_claude_for_windows/issues/30
-* モデルの導入: https://github.com/kasei-san/dot_claude_for_windows/issues/24
-* `~/.claude/docs/local-llm.md`
+`start.bat` は **SearXNG がこのリポジトリと並んでいる**ことを既定とする:
+
+```
+<親ディレクトリ>/
+  searxng/          <- SearXNG の checkout（venv 込み）
+  ollama-search/    <- このリポジトリ
+```
+
+別の場所に置くなら環境変数で上書きする:
+
+| 変数 | 既定 |
+|---|---|
+| `SEARXNG_DIR` | `<このリポジトリ>/../searxng` |
+| `SEARXNG_URL` | `http://127.0.0.1:8888` |
+| `OLLAMA_HOST` | `http://localhost:11434` |
+| `OLLAMA_SEARCH_MODEL` | `hauhau-aggressive:iq2m` |
+
+`settings-local.yml` と `sitecustomize.py` と `start-searxng.ps1` は
+**SearXNG 側に配置する原本**（それぞれ checkout 直下と
+`.venv/Lib/site-packages/` へコピーする）。
+
+**`settings-local.yml` の `secret_key` は書き換えること。**
+127.0.0.1 に閉じている限り実害は無いが、公開リポジトリに載っている値をそのまま
+使うことになる。
