@@ -33,21 +33,68 @@ stop.bat /all              上記に加えて Ollama も終了する
 `start.bat` が Ollama を必要なら起動し、応答するまで待ってから
 `ollama-search.py` に渡す。既に動いていれば素通りする。
 
-## 検索バックエンドは2つ
+## 検索バックエンドは3つ
 
-`SEARCH_BACKEND` で切り替える。**既定は `ddgs`。**
+`SEARCH_BACKEND` で切り替える。**未設定なら `BRAVE_API_KEY` の有無で自動選択。**
 
-| | 中身 | 別プロセス |
+| | 中身 | キー | 別プロセス |
+|---|---|---|---|
+| **`brave`** | [Brave Search API](https://brave.com/search/api/)（**公式**） | 要る | 不要 |
+| **`ddgs`** | pip の [ddgs](https://pypi.org/project/ddgs/)（旧 `duckduckgo-search`） | 不要 | 不要 |
+| `searxng` | 自前で立てた SearXNG | 不要 | 要る |
+
+### キーの置き場
+
+`.env.example` を `.env` にコピーして書く。**`.env` は `.gitignore` 済み。**
+
+```
+BRAVE_API_KEY=xxxxxxxxxxxxxxxx
+```
+
+`ollama-search.py` が隣の `.env` を読む（`python-dotenv` は使わない）。
+**既存の環境変数があればそちらが優先**されるので、一時的な上書きは
+`SEARCH_BACKEND=ddgs python ollama-search.py ...` でできる。
+
+> **どうやってこの3つに行き着いたかは
+> [issues/5](https://github.com/kasei-san/ollama-toolbox/issues/5)。**
+> DuckDuckGo を使いたいという要望から始まり、DDG が3経路とも死んでいると判明し、
+> SearXNG が実は Google 依存だったと分かるまでの経緯と、外した仮説を置いてある。
+
+### なぜ brave を優先するか
+
+`ddgs` は**各エンジンの HTML をスクレイピングしている**ので、
+レート制限・HTML 変更・規約のいずれでも壊れうる。実際 `duckduckgo` と `google` は
+既に 0 件で死んでおり、`brave` もレート制限に当たることがある。
+**公式 API はそのどれでも壊れない**（$5/1,000リクエスト、毎月 $5 分のクレジットが自動付与（実質 約1,000リクエスト/月・50 q/s）。2026-08-11 時点の公式価格表）。
+
+### Brave API の利用規約（2026-08-11 時点）
+
+**推論時の文脈として使うのは、Brave 自身が売り文句にしている用途。**
+公式の価格表は Search プランの機能として `LLM context optimized for AI` を挙げている。
+つまり検索結果を LLM に食わせて答えを作ること自体は想定内。
+
+**禁じられているのは「AI を作る材料として使う」方。** §3(b)(xiii):
+
+> use the Search Results to create, evaluate, train, re-train, fine-tune,
+> benchmark or otherwise improve artificial intelligence models
+> **or services offered by Customer or third parties**
+
+学習・評価・ベンチマークのデータセットとして使うのが対象で、
+かつ「**Customer や第三者が提供する**」モデル／サービスが目的語。
+個人が手元で推論の文脈に使うぶんは、この禁止の中心からは外れる。
+ただし `create` と `services` は広く、**外形的に読めば grey**。
+
+他に効いてくる条項:
+
+| 条項 | 内容 | このツールでは |
 |---|---|---|
-| **`ddgs`**（既定） | pip の [ddgs](https://pypi.org/project/ddgs/)（旧 `duckduckgo-search`） | **不要** |
-| `searxng` | 自前で立てた SearXNG | 要る（`start.bat` が面倒を見る） |
+| §3(b)(i) | 結果の保存・キャッシュ・DB化の禁止（動作に必要な一時保存は可） | モデルの文脈に渡すだけで保存しない。**問題なし** |
+| §4(a)(ii) | `POWERED BY BRAVE` とロゴを目立つ形で表示 | 個人利用なら表示先が無い。**公開アプリにするなら要対応** |
+| §3(b) | `obscene, abusive, or otherwise offensive content` 等に関連した利用の禁止 | 文言が曖昧。**気にするなら `SEARCH_BACKEND=ddgs`** |
 
-**`ddgs` を既定にしたのは SearXNG のセットアップが丸ごと不要になるから。**
-clone も sparse-checkout も Unix API シムも常駐プロセスも起動待ちも消える。
-プライバシーは同等 — どちらも自分のマシンから検索エンジンへ直接行き、
-仲介するサービスは無い（ollama.com の web search API を使わない理由は後述）。
+規約が気になるなら `ddgs` に落とせる。ただしそちらは**スクレイピングという別種のグレー**を抱えている。
 
-### どのエンジンが実際に動くか（2026-08-11 実測）
+### ddgs のどのエンジンが実際に動くか（2026-08-11 実測）
 
 `ddgs` は名前に反して**メタ検索**で、text 用に9エンジンを持つ。結果を返したのは3つだけ:
 
@@ -56,11 +103,10 @@ clone も sparse-checkout も Unix API シムも常駐プロセスも起動待�
 | **bing / brave / yandex** | duckduckgo / **google** / mojeek / yahoo / startpage / wikipedia |
 
 **`duckduckgo` 本体が死んでいるのは皮肉**だが、**`google` も同じく死んでいる**ので、
-結果として **Google 依存からは完全に離れられている**
-（SearXNG 経由だと結果の75%が `google cse` 由来だった。後述）。
+`ddgs` を使う限り Google 依存からは離れられている。
 
 既定は `DDGS_BACKEND="bing,brave,yandex"` と**明示**してある。`auto` でも動くが、
-何を叩いているか読めなくなるため。上記が枯れたら `DDGS_BACKEND` で差し替える。
+何を叩いているか読めなくなるため。
 
 ### セーフサーチは既定で off
 
@@ -68,11 +114,11 @@ clone も sparse-checkout も Unix API シムも常駐プロセスも起動待�
 
 **バックエンドごとに語彙が違う**ので、ツール側で正準語を決めて変換している:
 
-| このツール | ddgs | SearXNG |
-|---|---|---|
-| `off` | `off` | `0` |
-| `moderate` | `moderate` | `1` |
-| `strict` | **`on`** | `2` |
+| このツール | Brave | ddgs | SearXNG |
+|---|---|---|---|
+| `off` | `off` | `off` | `0` |
+| `moderate` | `moderate` | `moderate` | `1` |
+| `strict` | `strict` | **`on`** | `2` |
 
 `ddgs` の最も厳しい値は `on` で、**`strict` は無効値**。しかも
 **ddgs は無効値を渡しても例外にならず素通しする**ので、
@@ -93,8 +139,18 @@ clone も sparse-checkout も Unix API シムも常駐プロセスも起動待�
 | ddgs / yandex | 別ハッシュ | 別ハッシュ | 別ハッシュ |
 | ddgs / brave | 計測時レート制限で取得不可 | 〃 | 〃 |
 | SearXNG | **46件** | **30件** | **20件** |
+| Brave API | 20件 | 20件 | 19件 |
 
-`brave` だけ未確認。
+Brave API は差が小さい（`off` と `moderate` は同数）。ドキュメント上は
+`off` = 違法コンテンツ以外はフィルタしない、`strict` = 露骨＋示唆的なものも除外。
+
+#### 検閲は掛かっていない（成人向けカテゴリで確認、2026-08-11）
+
+Brave API・`safesearch=off` で、成人向けドメインが実際に返ることを確認済み
+（`free porn videos` で20件中10件、日本語クエリでも同様）。`strict` にすると 0〜4件に落ちる。
+
+**Brave は独自インデックスを持つ**ので、Google / Bing のポリシー変更に巻き込まれない。
+ただし**測ったのは成人向けカテゴリだけ**で、他の領域は未検証。
 
 ### この設定と無関係に返らないもの
 
@@ -120,7 +176,7 @@ Instant Answer API（`api.duckduckgo.com`）だが、これは検索 API では�
 死んでいるのはこれが理由。
 
 **より安定させたいなら公式 API のある [Brave Search API](https://brave.com/search/api/)
-（無料枠 2,000 クエリ/月）に移るのが筋。** brave は既に動いている3エンジンの1つなので、
+に移るのが筋。** brave は既に動いている3エンジンの1つなので、
 スクレイピングから公式 API に置き換える形になり、レート制限と HTML 変更の
 リスクが消える。**`ddgs` はスクレイピングなので各サイトの規約上もグレー**である点も併せて。
 
@@ -149,7 +205,8 @@ RAM は無視できるが **VRAM は無視できない**。**Forge や ComfyUI �
 | `start.bat` | 入口。起動と待機 |
 | `stop.bat` | VRAM 解放と SearXNG 停止。`/all` で Ollama も |
 | `ollama-search.py` | エージェント本体。`ddgs` 以外は標準ライブラリのみ |
-| `requirements.txt` | `ddgs`。既定バックエンドに必要 |
+| `requirements.txt` | `ddgs`。`ddgs` バックエンドに必要（brave は stdlib のみ） |
+| `.env.example` | キーの雛形。`.env` にコピーして使う |
 | `settings-local.yml` | SearXNG 設定（`searxng` バックエンド時のみ）。**SearXNG の checkout 直下に置く原本** |
 | `sitecustomize.py` | Unix API シム。**SearXNG の `.venv/Lib/site-packages/` に置く原本** |
 | `start-searxng.ps1` | SearXNG 単体起動。**SearXNG の checkout 直下に置く原本** |
@@ -287,9 +344,10 @@ Docker も WSL も使っていない。**SearXNG は Linux 前提だが、依存
 
 | 変数 | 既定 |
 |---|---|
-| `SEARCH_BACKEND` | `ddgs`（`searxng` も可） |
+| `SEARCH_BACKEND` | キーがあれば `brave`、無ければ `ddgs`（`searxng` も可） |
 | `DDGS_BACKEND` | `bing,brave,yandex` |
-| `SAFESEARCH` | `off`（`moderate` / `strict` も可） |
+| `SEARCH_SAFESEARCH` | `off`（`moderate` / `strict` も可） |
+| `BRAVE_API_KEY` | なし（`.env` から読む） |
 | `SEARXNG_DIR` | `<このリポジトリ>/../searxng` |
 | `SEARXNG_URL` | `http://127.0.0.1:8888` |
 | `OLLAMA_HOST` | `http://localhost:11434` |
