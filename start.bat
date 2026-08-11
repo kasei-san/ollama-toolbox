@@ -45,11 +45,15 @@ call :waitfor "%OLLAMA_URL%" 30 Ollama || goto :fail
 
 :searxng
 REM --- 2/2  SearXNG ----------------------------------------------------------
-REM  Only the "searxng" backend needs a separate process.  The default (ddgs)
-REM  reaches the search engines from inside the Python process, so skip all this.
-if not defined SEARCH_BACKEND set "SEARCH_BACKEND=ddgs"
+REM  Only the "searxng" backend needs a separate process.  brave and ddgs reach
+REM  the search engines from inside the Python process, so skip all this.
+REM
+REM  Do NOT default SEARCH_BACKEND here.  The Python side picks brave when a
+REM  BRAVE_API_KEY is present (possibly from .env, which this script never reads);
+REM  exporting a value would override that choice.  Only an explicit "searxng"
+REM  means we have a process to launch.
 if /i not "%SEARCH_BACKEND%"=="searxng" (
-    echo [2/2] SearXNG   : not needed ^(SEARCH_BACKEND=%SEARCH_BACKEND%^)
+    echo [2/2] SearXNG   : not needed
     goto :run
 )
 curl -s -m 3 -o nul "%SEARXNG_URL%"

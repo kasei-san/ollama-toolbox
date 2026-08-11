@@ -9,16 +9,17 @@
 思考の中身は stderr にリアルタイムで流す。答えは stdout なので、
 `... 2>nul` で思考だけ捨てられるし、`... >out.txt` で答えだけ拾える。
 
-検索バックエンドは2つ。`SEARCH_BACKEND` で切り替える。
+検索バックエンドは3つ。`SEARCH_BACKEND` で切り替える。
 
-  ddgs    （既定）pip の ddgs。外部プロセス不要。bing/brave/yandex を叩く
+  brave   Brave Search API（公式）。**BRAVE_API_KEY があればこれが既定**
+  ddgs    pip の ddgs。キーが無いときの既定。bing/brave/yandex をスクレイプ
   searxng 自前で立てた SearXNG（別プロセスが要る。start.bat が面倒を見る）
 
-どちらも **ollama.com の web search API は使わない**。あれは無料で手軽だが、
+キーは隣の `.env`（.gitignore 済み）から読む。既存の環境変数があればそちらが優先。
+
+いずれも **ollama.com の web search API は使わない**。あれは無料で手軽だが、
 検索クエリが ollama.com に送られる。モデルの推論は元々ローカル完結なので
 外に出るのは「何を検索したか」だけだが、それも出したくないという判断。
-ddgs / SearXNG はどちらも自分のマシンから検索エンジンに直接行くので、
-その点では同等。
 
 なぜ強制オプションがあるか:
   「日本の首相は？」のような質問で、モデルは4〜6割の確率で検索せず記憶から答える
@@ -44,14 +45,41 @@ if not sys.stdin.isatty() and hasattr(sys.stdin, "buffer"):
 class SearchFailed(Exception):
     """検索が失敗した。モデルに記憶で答えさせないため、ここで打ち切る。"""
 
+
+def _load_dotenv():
+    """隣の .env を読む。**既存の環境変数は上書きしない**（そちらが優先）。
+
+    python-dotenv を足すほどのことではないので自前。`.env` は .gitignore 済み。
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.isfile(path):
+        return
+    with io.open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+_load_dotenv()
+
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 MODEL = os.environ.get("OLLAMA_SEARCH_MODEL", "hauhau-aggressive:iq2m")
 SEARXNG = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8888")
 MAX_ROUNDS = 4
 FETCH_CHARS = 6000
 
-# 検索バックエンド: "ddgs"（既定、pip の ddgs が要る）か "searxng"
-BACKEND = os.environ.get("SEARCH_BACKEND", "ddgs").lower()
+# 検索バックエンド: "brave" / "ddgs" / "searxng"
+# **BRAVE_API_KEY があれば brave を優先する。** 公式 API なのでスクレイピングと違い
+# レート制限や HTML 変更で壊れない。キーが無ければ ddgs に落ちる。
+BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "").strip()
+BACKENDS = ("brave", "ddgs", "searxng")
+BACKEND = os.environ.get(
+    "SEARCH_BACKEND", "brave" if BRAVE_API_KEY else "ddgs").strip().lower()
+if BACKEND not in BACKENDS:
+    sys.exit(f"SEARCH_BACKEND={BACKEND!r} は無効。{'/'.join(BACKENDS)} のいずれかを指定すること。")
 
 # ddgs が内部で叩くエンジン。2026-08-11 の実測で**結果を返したのはこの3つだけ**:
 #   動く    : bing / brave / yandex
@@ -67,10 +95,11 @@ DDGS_BACKEND = os.environ.get("DDGS_BACKEND", "bing,brave,yandex")
 #   SearXNG   : 0   / 1        / 2
 # ddgs に "strict" を渡しても例外にならず素通しされるだけなので、
 # **無効値は黙って通る**。だから受け取った時点で検証して落とす。
+#   Brave     : off / moderate / strict  ← 正準語とそのまま一致
 SAFESEARCH_MAP = {
-    "off":      {"ddgs": "off",      "searxng": 0},
-    "moderate": {"ddgs": "moderate", "searxng": 1},
-    "strict":   {"ddgs": "on",       "searxng": 2},
+    "off":      {"ddgs": "off",      "searxng": 0, "brave": "off"},
+    "moderate": {"ddgs": "moderate", "searxng": 1, "brave": "moderate"},
+    "strict":   {"ddgs": "on",       "searxng": 2, "brave": "strict"},
 }
 SAFESEARCH = os.environ.get("SEARCH_SAFESEARCH", "off").strip().lower()
 if SAFESEARCH not in SAFESEARCH_MAP:
@@ -154,6 +183,45 @@ def ollama_chat(messages, tools=TOOLS, think=False, show_think=False):
     if tool_calls:
         out["tool_calls"] = tool_calls
     return out
+
+
+def brave_search(query, max_results):
+    """Brave Search API（公式）。BRAVE_API_KEY が要る。
+
+    スクレイピングでないので、レート制限や HTML 変更で壊れない。
+    無料枠は $5/月のクレジット（$5/1,000リクエストなので実質 約1,000/月）。
+    """
+    if not BRAVE_API_KEY:
+        return {"error": "BRAVE_API_KEY が未設定。.env に入れるか、"
+                         "SEARCH_BACKEND=ddgs に切り替えること。"}
+    url = "https://api.search.brave.com/res/v1/web/search?" + urllib.parse.urlencode(
+        {"q": query, "count": max(1, min(20, max_results)),
+         "safesearch": SAFESEARCH_MAP[SAFESEARCH]["brave"]})
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/json",
+        "X-Subscription-Token": BRAVE_API_KEY})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:200]
+        hint = ""
+        if e.code == 401:
+            hint = " キーが無効か失効している。"
+        elif e.code == 429:
+            hint = " レート制限。無料枠の上限か q/s 超過を疑う。"
+        return {"error": f"Brave API HTTP {e.code}:{hint} {body}"}
+    except Exception as e:                                  # noqa: BLE001
+        return {"error": f"Brave API: {type(e).__name__}: {e}"}
+
+    hits = (data.get("web") or {}).get("results") or []
+    if not hits:
+        return {"error": f"'{query}' の検索結果が 0 件 (brave)"}
+    return {"query": query,
+            "results": [{"title": h.get("title", ""),
+                         "url": h.get("url", ""),
+                         "content": (h.get("description") or "")[:600]}
+                        for h in hits[:max_results]]}
 
 
 def ddgs_search(query, max_results):
@@ -259,7 +327,8 @@ def run_tool(name, args, user_question=""):
         if q != args.get("query", ""):
             print(f"  [年号を除去] {args.get('query')!r} -> {q!r}", file=sys.stderr)
         n = max(1, min(10, int(mr)))
-        res = ddgs_search(q, n) if BACKEND == "ddgs" else searxng_search(q, n)
+        res = {"brave": brave_search, "ddgs": ddgs_search,
+               "searxng": searxng_search}[BACKEND](q, n)
     elif name == "web_fetch":
         res = web_fetch(args.get("url", ""))
     else:
