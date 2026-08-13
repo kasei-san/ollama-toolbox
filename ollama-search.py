@@ -49,6 +49,14 @@ class SearchFailed(Exception):
     """検索が失敗した。モデルに記憶で答えさせないため、ここで打ち切る。"""
 
 
+class OllamaFailed(Exception):
+    """Ollama がリクエストを受け付けなかった。**検索の失敗とは別物。**
+
+    一緒くたにすると「検索に失敗した」と表示されて、VRAM 不足やモデルの
+    打ち間違いを検索の問題だと思って調べ始めることになる（実際やった）。
+    """
+
+
 def _load_dotenv():
     """隣の .env を読む。**既存の環境変数は上書きしない**（そちらが優先）。
 
@@ -137,6 +145,51 @@ TOOLS = [
 # 打ち切り時にモデルへ渡す指示。履歴に残す価値が無いので、識別できるよう定数にする。
 STOP_SEARCHING = ("Stop searching. Answer now using only the search results above. "
                   "If they are insufficient, say so explicitly.")
+
+
+# --- 進捗の出し先 -----------------------------------------------------------
+# 途中経過は `emit(kind, payload)` に流す。CLI は stderr に出し、web UI は SSE で
+# ブラウザに送る。**出し先を知っているのは emitter だけ**にして、エージェント側は
+# 誰に向かって喋っているのかを知らずに済ませる。
+#   think    思考の断片        content  答えの断片
+#   tool     ツール呼び出し     result   ツールの結果
+#   note     こちらからの注記   endturn  ターンの終わり（表示を閉じるため）
+
+def noop_emitter(kind, payload):
+    return None
+
+
+def cli_emitter(verbose=True):
+    """CLI 用の出し先。**答え（stdout）と混ぜない**ので全部 stderr。
+
+    思考は改行だらけなので字下げを保って読めるようにする。
+    ブロックを閉じる改行が要るので、開いているかどうかを覚えている。
+    """
+    if not verbose:
+        return noop_emitter
+    state = {"think_open": False}
+
+    def emit(kind, payload):
+        if kind == "think":
+            if not state["think_open"]:
+                print("  [think] ", end="", file=sys.stderr, flush=True)
+                state["think_open"] = True
+            print(payload.replace("\n", "\n          "),
+                  end="", file=sys.stderr, flush=True)
+            return
+        if state["think_open"]:                    # think 以外が来たら閉じる
+            print("\n", file=sys.stderr, flush=True)
+            state["think_open"] = False
+        if kind == "tool":
+            print(f"  [{payload['name']}] "
+                  f"{json.dumps(payload['args'], ensure_ascii=False)}",
+                  file=sys.stderr)
+        elif kind == "note":
+            print(f"  [{payload}]", file=sys.stderr)
+        # content（答えの逐次）と result（結果の中身）は CLI では出さない。
+        # 答えは ask() の戻り値でまとめて stdout に出る。
+
+    return emit
 
 
 def loaded_num_ctx(model=None):
@@ -270,6 +323,10 @@ class Conversation:
 
         見積もりは所詮 文字数 ÷ 係数 なので、**実測が取れるならそちらに寄せる。**
         極端な値で暴れないよう範囲で挟む。
+
+        `prompt_tokens` にはツール定義（毎回送られる。約200トークン）が含まれるが
+        `chars` には無いので、係数は本来より小さめに出る。つまり見積もりは
+        **多めに出る**。早めに削る方向なので、ズレるならこちらで構わない。
         """
         if not self._ctx_confirmed:
             self._ctx_confirmed = True
@@ -285,8 +342,8 @@ class Conversation:
         if chars:
             self.chars_per_token = min(6.0, max(0.5, chars / prompt_tokens))
 
-    def trim(self, verbose=True):
-        """予算を超えていたら古い方から削る。**黙って忘れない**（stderr に出す）。
+    def trim(self, emit=noop_emitter):
+        """予算を超えていたら古い方から削る。**黙って忘れない**（emit で伝える）。
 
         2段階。まず古いターンから検索結果だけ剥がし、それでも足りなければ
         ターンごと捨てる。検索結果は嵩む割に後から効きにくく、
@@ -303,11 +360,34 @@ class Conversation:
         while self.turns and self.est_tokens() > budget:
             self.turns.pop(0)
             dropped += 1
-        if verbose and (stripped or dropped):
-            print(f"  [履歴を圧縮: 検索結果を剥がした {stripped}ターン / "
-                  f"丸ごと捨てた {dropped}ターン。"
-                  f"残り {len(self.turns)}ターン, 約{self.est_tokens()}トークン "
-                  f"(予算 {budget})]", file=sys.stderr)
+        if stripped or dropped:
+            emit("note", f"履歴を圧縮: 検索結果を剥がした {stripped}ターン / "
+                         f"丸ごと捨てた {dropped}ターン。"
+                         f"残り {len(self.turns)}ターン, 約{self.est_tokens()}トークン "
+                         f"(予算 {budget})")
+
+
+def _ollama_error(e):
+    """`HTTPError` から**読める理由**を作る。
+
+    `str(HTTPError)` は `HTTP Error 500: Internal Server Error` までしか言わない。
+    **理由は本文にある**（VRAM 不足、モデル名の打ち間違い、等）。読まずに投げると、
+    500 という数字だけを見て検索やネットワークを疑うことになる。
+    """
+    try:
+        detail = (json.loads(e.read().decode("utf-8", "replace"))
+                  or {}).get("error", "")
+    except Exception:                                       # noqa: BLE001
+        detail = ""
+    msg = f"Ollama が HTTP {e.code} を返した: {detail or e.reason}"
+    if "out of memory" in detail or "cudaMalloc" in detail:
+        # このマシンで実際に踏む。空き VRAM を測らずに「モデルが壊れた」と
+        # 判断しないための道しるべ。
+        msg += ("\n  VRAM が足りない。空きは `nvidia-smi` で見る。"
+                "\n  他のアプリを閉じるか、num_ctx の小さいモデルに切り替えること。")
+    elif "not found" in detail.lower():
+        msg += "\n  モデル名を確認すること（`ollama list`）。"
+    return msg
 
 
 def post(url, payload, headers, timeout):
@@ -318,12 +398,12 @@ def post(url, payload, headers, timeout):
         return json.loads(r.read().decode("utf-8"))
 
 
-def ollama_chat(messages, tools=TOOLS, think=False, show_think=False, usage=None):
+def ollama_chat(messages, tools=TOOLS, think=False, emit=noop_emitter, usage=None):
     """Ollama に投げて assistant メッセージを組み立てて返す。
 
     常にストリーミングで受ける。思考を出すのが目的で、まとめて受け取ると
     最初の1問で50秒ほど無言になり、止まっているのか考えているのか分からない。
-    思考は stderr に流し、答え（stdout）と混ざらないようにしている。
+    届いた端から `emit` に流す（CLI なら stderr、web UI なら SSE）。
 
     `usage` に dict を渡すと、最終チャンクの `prompt_eval_count` を入れて返す。
     **これが送ったプロンプトの実測トークン数**で、履歴の見積もりの補正に使う。
@@ -336,8 +416,15 @@ def ollama_chat(messages, tools=TOOLS, think=False, show_think=False, usage=None
         f"{OLLAMA}/api/chat", json.dumps(body).encode("utf-8"),
         {"Content-Type": "application/json"})
 
-    content, thinking, tool_calls, opened = [], [], [], False
-    with urllib.request.urlopen(req, timeout=900) as r:
+    content, thinking, tool_calls = [], [], []
+    try:
+        conn = urllib.request.urlopen(req, timeout=900)
+    except urllib.error.HTTPError as e:
+        raise OllamaFailed(_ollama_error(e)) from None
+    except urllib.error.URLError as e:
+        raise OllamaFailed(f"Ollama ({OLLAMA}) に繋がらない: {e.reason}。"
+                           f"start.bat か webui.bat から起動すること。") from None
+    with conn as r:
         for raw in r:
             raw = raw.strip()
             if not raw:
@@ -348,16 +435,11 @@ def ollama_chat(messages, tools=TOOLS, think=False, show_think=False, usage=None
             piece = msg.get("thinking")
             if piece:
                 thinking.append(piece)
-                if show_think:
-                    if not opened:
-                        print("  [think] ", end="", file=sys.stderr, flush=True)
-                        opened = True
-                    # 思考は改行だらけなので、字下げを保って読めるようにする
-                    print(piece.replace("\n", "\n          "),
-                          end="", file=sys.stderr, flush=True)
+                emit("think", piece)
 
             if msg.get("content"):
                 content.append(msg["content"])
+                emit("content", msg["content"])
             if msg.get("tool_calls"):
                 tool_calls.extend(msg["tool_calls"])
             if chunk.get("done"):
@@ -365,9 +447,6 @@ def ollama_chat(messages, tools=TOOLS, think=False, show_think=False, usage=None
                     usage["prompt_tokens"] = chunk.get("prompt_eval_count")
                     usage["eval_tokens"] = chunk.get("eval_count")
                 break
-
-    if opened:
-        print("\n", file=sys.stderr, flush=True)
 
     out = {"role": "assistant", "content": "".join(content)}
     if thinking:
@@ -512,12 +591,12 @@ def web_fetch(url):
             "truncated": len(text) > FETCH_CHARS}
 
 
-def run_tool(name, args, user_question=""):
+def run_tool(name, args, user_question="", emit=noop_emitter):
     if name == "web_search":
         mr = args.get("max_results") or 5
         q = strip_stale_year(args.get("query", ""), user_question)
         if q != args.get("query", ""):
-            print(f"  [年号を除去] {args.get('query')!r} -> {q!r}", file=sys.stderr)
+            emit("note", f"年号を除去: {args.get('query')!r} -> {q!r}")
         n = max(1, min(10, int(mr)))
         res = {"brave": brave_search, "ddgs": ddgs_search,
                "searxng": searxng_search}[BACKEND](q, n)
@@ -533,7 +612,7 @@ def run_tool(name, args, user_question=""):
     return res
 
 
-def ask(question, conv=None, force=False, verbose=True, think=True):
+def ask(question, conv=None, force=False, verbose=True, think=True, emit=None):
     """1ターン分を回して最終回答を返す。
 
     `conv` を渡すと、その履歴を前に付けて送り、**終わったターンを履歴に積む**。
@@ -541,26 +620,30 @@ def ask(question, conv=None, force=False, verbose=True, think=True):
 
     ターンは最後まで通ってから積む。途中で `SearchFailed` が飛べば
     **質問ごと履歴に残らない**が、モデルが答えていない以上それが正しい。
+
+    `emit(kind, payload)` に進捗が流れる。CLI は stderr、web UI は SSE。
+    kind は think / content / tool / result / note。
     """
-    show = verbose and think
+    if emit is None:
+        emit = cli_emitter(verbose)
     if conv is None:
         conv = Conversation()
-    conv.trim(verbose)
+    conv.trim(emit)
 
     turn = [{"role": "user", "content": question}]
 
     def send(tools):
         sent = conv.messages(turn)
         usage = {}
-        msg = ollama_chat(sent, tools=tools, think=think, show_think=show, usage=usage)
+        msg = ollama_chat(sent, tools=tools, think=think, emit=emit, usage=usage)
         conv.observe(usage.get("prompt_tokens"), sent)
         return msg
 
     if force:
         # モデルの判断に任せず、こちらで1回目の検索を済ませて結果を渡す。
-        res = run_tool("web_search", {"query": question}, question)
-        if verbose:
-            print(f"  [forced search] {question}", file=sys.stderr)
+        emit("note", f"forced search: {question}")
+        res = run_tool("web_search", {"query": question}, question, emit)
+        emit("result", {"name": "web_search", "result": res})
         turn.append({"role": "tool", "tool_name": "web_search",
                      "content": json.dumps(res, ensure_ascii=False)[:8000]})
 
@@ -570,28 +653,215 @@ def ask(question, conv=None, force=False, verbose=True, think=True):
         if not calls:
             turn.append(msg)
             conv.add_turn(turn)
+            emit("endturn", None)      # CLI 側で開いたままの思考ブロックを閉じる
             return msg.get("content", "")
         turn.append(msg)
         for c in calls:
             fn = c["function"]
             args = fn.get("arguments") or {}
-            if verbose:
-                print(f"  [{fn['name']}] {json.dumps(args, ensure_ascii=False)}",
-                      file=sys.stderr)
-            res = run_tool(fn["name"], args, question)
+            emit("tool", {"name": fn["name"], "args": args})
+            res = run_tool(fn["name"], args, question, emit)
+            emit("result", {"name": fn["name"], "result": res})
             turn.append({"role": "tool", "tool_name": fn["name"],
                          "content": json.dumps(res, ensure_ascii=False)[:8000]})
 
     # 上限に達した。日付が分からないせいでモデルは「もっと新しいものがあるはず」と
     # 検索を繰り返しがち（実測）。ここで**ツールを外して**もう一度呼び、
     # 集めた結果から答えさせる。記憶から答えさせるのとは違う点に注意。
-    if verbose:
-        print(f"  [{MAX_ROUNDS}回で打ち切り。集めた結果から回答させる]", file=sys.stderr)
+    emit("note", f"{MAX_ROUNDS}回で打ち切り。集めた結果から回答させる")
     turn.append({"role": "user", "content": STOP_SEARCHING})
     msg = send(None)
     turn.append(msg)
     conv.add_turn(turn)
+    emit("endturn", None)
     return msg.get("content", "")
+
+
+def model_exists(name):
+    """そのモデルが Ollama にあるか。**確認できなければ None**（False ではない）。
+
+    Ollama が落ちているだけのときに「無い」と言い切ると、
+    直せるはずの状況で切り替えを拒否することになる。区別する。
+    """
+    try:
+        with urllib.request.urlopen(f"{OLLAMA}/api/tags", timeout=15) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:                                       # noqa: BLE001
+        return None
+    return any(m.get("name") == name for m in data.get("models") or [])
+
+
+def modelfile_system(model=None):
+    """Modelfile に焼かれた SYSTEM。`/system` 未設定のとき効いているのはこれ。"""
+    try:
+        return (post(f"{OLLAMA}/api/show", {"model": model or MODEL}, {}, 30)
+                .get("system") or "")
+    except Exception:                                       # noqa: BLE001
+        return ""
+
+
+def _onoff(rest, current):
+    """`on` / `off` / 空（トグル）を解釈する。それ以外は ValueError。"""
+    rest = rest.strip().lower()
+    if not rest:
+        return not current
+    if rest in ("on", "yes", "true", "1"):
+        return True
+    if rest in ("off", "no", "false", "0"):
+        return False
+    raise ValueError(f"on / off のどちらかを指定すること（受け取ったのは {rest!r}）")
+
+
+class Repl:
+    """対話モードの状態と、行頭 `/` のコマンド。
+
+    **未知のコマンドはモデルに送らない。** `/claer` のようなタイポが黙って質問として
+    流れると、推論が1回無駄になるうえ「なぜ効かないのか」が分からない。
+    知らないものは知らないと言って止める。
+
+    コマンドの出力は全部 stderr。答え（stdout）と混ぜないという既存の方針に合わせる。
+    """
+
+    ALIASES = {"?": "help", "h": "help", "q": "exit", "quit": "exit",
+               "reset": "clear", "sys": "system", "hist": "history"}
+
+    def __init__(self, args):
+        self.conv = Conversation()
+        self.force = args.force
+        self.think = args.think
+        self.verbose = not args.quiet
+        self.done = False
+
+    # -- 入口 --------------------------------------------------------------
+    def handle(self, line):
+        """1行を処理する。コマンドなら実行、そうでなければモデルに投げる。"""
+        # 行頭 '//' は '/' 1つのエスケープ。'/' で始まる文章を本当に送りたいとき用。
+        if line.startswith("//"):
+            return self.query(line[1:])
+        if line.startswith("/"):
+            return self.command(line)
+        # 昔からある終了語。指が覚えているものを取り上げる理由がない。
+        if line.lower() in ("exit", "quit", ":q", ":wq", "終了", "おわり"):
+            self.done = True
+            return
+        return self.query(line)
+
+    def command(self, line):
+        name, _, rest = line[1:].partition(" ")
+        name = name.strip().lower()
+        fn = getattr(self, "cmd_" + self.ALIASES.get(name, name), None)
+        if not fn:
+            print(f"  知らないコマンド: /{name}   （/help で一覧。"
+                  f"'/' で始まる文章を送りたいなら '//' で始める）", file=sys.stderr)
+            return
+        try:
+            fn(rest.strip())
+        except ValueError as e:
+            print(f"  {e}", file=sys.stderr)
+
+    def query(self, question):
+        force = self.force or question.startswith("!")
+        try:
+            print(ask(question.lstrip("!").strip(), self.conv, force,
+                      self.verbose, self.think))
+        except SearchFailed as e:
+            print(f"検索に失敗した: {e}", file=sys.stderr)
+        except OllamaFailed as e:
+            # 対話モードは落とさない。モデルを切り替えれば続けられる。
+            print(f"{e}", file=sys.stderr)
+
+    # -- コマンド ----------------------------------------------------------
+    #   docstring の1行目がそのまま /help の説明になる。
+    def cmd_help(self, rest):
+        """コマンド一覧"""
+        print("  コマンド:", file=sys.stderr)
+        for n in sorted(x[4:] for x in dir(self) if x.startswith("cmd_")):
+            doc = (getattr(self, "cmd_" + n).__doc__ or "").splitlines()[0]
+            print(f"    /{n:<8} {doc}", file=sys.stderr)
+        print("  そのほか:", file=sys.stderr)
+        print("    行頭 '!'  その1問だけ検索を強制", file=sys.stderr)
+        print("    行頭 '//' '/' で始まる文章をそのまま送る", file=sys.stderr)
+        print("    exit / quit / 終了 / おわり / :q / Ctrl-C  で抜ける",
+              file=sys.stderr)
+
+    def cmd_clear(self, rest):
+        """会話履歴を捨てる（システムプロンプトとモデルはそのまま）"""
+        print(f"  履歴を捨てた（{self.conv.clear()}ターン）", file=sys.stderr)
+
+    def cmd_history(self, rest):
+        """今積んでいる履歴を見る"""
+        c = self.conv
+        if not c.turns:
+            print("  履歴は空", file=sys.stderr)
+        for i, t in enumerate(c.turns, 1):
+            first = next((m.get("content", "") for m in t
+                          if m.get("role") == "user"), "")
+            last = next((m.get("content", "") for m in reversed(t)
+                         if m.get("role") == "assistant" and m.get("content")), "")
+            tools = sum(1 for m in t if m.get("role") == "tool")
+            mark = f" (検索結果 {tools}件)" if tools else ""
+            print(f"  {i}. > {first[:60]}{mark}", file=sys.stderr)
+            print(f"     < {last[:60]}", file=sys.stderr)
+        # 見積もりは履歴だけ、実測はツール定義と今の質問も含む**別のもの**。
+        # 並べると同じ量に見えるので、何を数えたか書いておく。
+        measured = (f", 直近の実測 {c.measured_tokens}トークン"
+                    f"（ツール定義と質問込み）" if c.measured_tokens else "")
+        print(f"  約{c.est_tokens()}トークン / 予算 {c.budget()} "
+              f"(num_ctx {c.num_ctx}){measured}", file=sys.stderr)
+
+    def cmd_system(self, rest):
+        """システムプロンプトの表示・設定・解除（/system reset で解除）"""
+        if not rest:
+            if self.conv.system is None:
+                baked = modelfile_system()
+                print("  未設定。Modelfile に焼かれた SYSTEM が効いている:",
+                      file=sys.stderr)
+                print(f"    {baked or '(空)'}", file=sys.stderr)
+            else:
+                print(f"  {self.conv.system}", file=sys.stderr)
+            return
+        if rest.lower() == "reset":
+            self.conv.system = None
+            print("  解除した。Modelfile の SYSTEM に戻る", file=sys.stderr)
+            return
+        # **Modelfile の SYSTEM を置き換える**（重ねるのではない）。
+        # 日付まわりの禁止もこれで消えるので、必要なら書き足すこと。
+        self.conv.system = rest
+        print("  設定した。**Modelfile の SYSTEM は置き換わる**"
+              "（日付まわりの禁止も消える）", file=sys.stderr)
+
+    def cmd_model(self, rest):
+        """モデルの表示・切り替え"""
+        global MODEL
+        if not rest:
+            print(f"  {MODEL}  (num_ctx {self.conv.num_ctx})", file=sys.stderr)
+            return
+        exists = model_exists(rest)
+        if exists is False:
+            raise ValueError(f"{rest!r} は Ollama に無い（ollama list で確認）")
+        if exists is None:
+            print("  警告: Ollama に繋がらずモデルの存在を確認できなかった",
+                  file=sys.stderr)
+        MODEL = rest
+        # num_ctx はモデルごとに違う。**引き直さないと予算が前のモデルのままになる。**
+        self.conv.num_ctx = detect_num_ctx()
+        self.conv._ctx_confirmed = False
+        print(f"  {MODEL} に切り替えた (num_ctx {self.conv.num_ctx})。"
+              f"履歴はそのまま（捨てるなら /clear）", file=sys.stderr)
+
+    def cmd_think(self, rest):
+        """思考の on / off（速さと精度のトレードオフ）"""
+        self.think = _onoff(rest, self.think)
+        print(f"  think = {'on' if self.think else 'off'}", file=sys.stderr)
+
+    def cmd_force(self, rest):
+        """検索強制を常時 on / off にする（1問だけなら行頭 '!'）"""
+        self.force = _onoff(rest, self.force)
+        print(f"  force = {'on' if self.force else 'off'}", file=sys.stderr)
+
+    def cmd_exit(self, rest):
+        """抜ける"""
+        self.done = True
 
 
 def main():
@@ -612,28 +882,24 @@ def main():
         except SearchFailed as e:
             print(f"検索に失敗した: {e}", file=sys.stderr)
             sys.exit(1)
+        except OllamaFailed as e:
+            print(f"{e}", file=sys.stderr)
+            sys.exit(1)
         return
 
-    conv = Conversation()
-    print(f"model={MODEL}  num_ctx={conv.num_ctx}"
-          f" (履歴の予算 {conv.budget()}トークン)", file=sys.stderr)
-    print("  exit / quit / 終了 または Ctrl-C で抜ける", file=sys.stderr)
-    print("  行頭 '!' で検索を強制", file=sys.stderr)
-    while True:
+    repl = Repl(a)
+    print(f"model={MODEL}  num_ctx={repl.conv.num_ctx}"
+          f" (履歴の予算 {repl.conv.budget()}トークン)", file=sys.stderr)
+    print("  /help でコマンド一覧。exit / quit / 終了 / Ctrl-C で抜ける",
+          file=sys.stderr)
+    while not repl.done:
         try:
-            q = input("> ").strip()
+            line = input("> ").strip()
         except (EOFError, KeyboardInterrupt):
             print(file=sys.stderr)
             return
-        if not q:
-            continue
-        if q.lower() in ("exit", "quit", ":q", ":wq", "終了", "おわり"):
-            return
-        force = a.force or q.startswith("!")
-        try:
-            print(ask(q.lstrip("!").strip(), conv, force, not a.quiet, a.think))
-        except SearchFailed as e:
-            print(f"検索に失敗した: {e}", file=sys.stderr)
+        if line:
+            repl.handle(line)
 
 
 if __name__ == "__main__":

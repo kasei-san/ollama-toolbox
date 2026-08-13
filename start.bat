@@ -26,10 +26,24 @@ if not defined SEARXNG_URL set "SEARXNG_URL=http://127.0.0.1:8888/"
 if not defined OLLAMA_HOST set "OLLAMA_HOST=http://localhost:11434"
 set "OLLAMA_URL=%OLLAMA_HOST%/api/tags"
 
+REM  Flash attention.  Measured 2026-08-11 on this box with the daily model at
+REM  num_ctx 40960:  17.40 GiB -> 11.84 GiB of VRAM.  Without it the model does
+REM  not fit in a 16GB card and Windows silently spills into shared system
+REM  memory, so it "works" but part of the model lives across PCIe.
+REM  See README, "## VRAM が足りないとき".
+if not defined OLLAMA_FLASH_ATTENTION set "OLLAMA_FLASH_ATTENTION=1"
+
 REM --- 1/2  Ollama -----------------------------------------------------------
 curl -s -m 3 -o nul "%OLLAMA_URL%"
 if not errorlevel 1 (
+    REM  Env vars only reach Ollama when WE start it.  If it is already up --
+    REM  and it usually is, the desktop app autostarts at login -- then
+    REM  OLLAMA_FLASH_ATTENTION set above does nothing.  Say so instead of
+    REM  letting it silently not apply.
     echo [1/2] Ollama    : already running
+    echo                   ^(flash attention setting not applied to a running
+    echo                    server; set OLLAMA_FLASH_ATTENTION=1 as a user
+    echo                    environment variable to make it stick^)
     goto :searxng
 )
 echo [1/2] Ollama    : starting...
