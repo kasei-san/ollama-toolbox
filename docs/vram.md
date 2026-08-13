@@ -101,7 +101,9 @@ Ollama が HTTP 500 を返した: llama-server ... cudaMalloc failed: out of mem
 `llama-server startup failed after projector CPU offload retry` という前置きが付くのは、
 **このモデルがビジョンエンコーダを積んでいる**ため（下記）。
 
-## このモデルはビジョンエンコーダを積んでいる
+## ビジョンエンコーダを外しても効かない（測定済み）
+
+このモデルは画像認識を積んだまま載っている:
 
 ```
 capabilities: ['tools', 'thinking', 'completion', 'vision']
@@ -109,8 +111,15 @@ clip.has_vision_encoder = True
 clip.projector_type = qwen3vl_merger
 ```
 
-HF 上の mmproj は 0.84 GiB。**web 検索エージェントには一切要らない。**
-外せば浮くはずだが、**flash attention で足りたので試していない**（未計測）。
+HF 上の mmproj は 0.84 GiB で、web 検索エージェントには一切要らない。
+ログにも `reserve_compute_meta: CUDA0 compute buffer size = 4657.81 MiB`（CLIP 分）が出るので
+**「外せば 4.6GB 空く」と踏みたくなるが、外れる。**
+
+**mmproj 抜きの派生を作って測っても、100% GPU の境界は 40960 のまま1ミリも動かなかった。**
+効いたのは境界より先の速度だけ（65536 で 56 → 70 tok/s）。
+
+> **ログの予約サイズは実割り当てではない。** 数字が大きいからといって、
+> そこを削れば同じだけ空くわけではない。
 
 ## さらに小さい量子化は必要なかった
 

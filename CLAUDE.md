@@ -108,9 +108,17 @@ printf '%s\n' '質問' 'exit' > /tmp/in.txt
 | `docs/setup.md` | Ollama とモデルの導入手順 |
 | `docs/vram.md` | VRAM の実測。flash attention、`num_ctx` の効き方、量子化の選択肢 |
 | `docs/model-date-sense.md` | 日付感覚の問題と、機械的に潰している3つ |
+| `docs/conversation.md` | 会話の文脈の持ち方。ターン単位で持つ理由、削り方、見積もり |
+| `docs/webui.md` | web の画面の設計判断、公式アプリを使わない理由、既知の粗さ |
 | `docs/search-backends.md` | 選定の経緯、Brave の規約、各エンジンの実測 |
 | `docs/searxng.md` | SearXNG を Windows で動かす細工 |
 | `docs/windows-bat.md` | `.bat` で踏んだ罠 |
 
-**仕様を変えたら README と該当の docs を同時に更新する。**
-同じ内容を README と docs に重複させない（移したら元は消す）。
+## 書く場所の分け方
+
+* **README は「使い方」だけ。** 起動方法・コマンド・画面の見方・環境変数・構成。
+  読む人が使えるようになるのが目的
+* **「なぜ」「踏んだ罠」「実測値」は docs。** README には**1行の要約とリンク**だけ置く
+* **1トピック1ファイル。** 迷ったら分けずに1つにしておき、肥大してから割る
+* **同じ内容を重複させない。** 移したら元は消す
+* 仕様を変えたら README と該当の docs を同時に更新する
