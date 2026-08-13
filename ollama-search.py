@@ -49,6 +49,14 @@ class SearchFailed(Exception):
     """検索が失敗した。モデルに記憶で答えさせないため、ここで打ち切る。"""
 
 
+class OllamaFailed(Exception):
+    """Ollama がリクエストを受け付けなかった。**検索の失敗とは別物。**
+
+    一緒くたにすると「検索に失敗した」と表示されて、VRAM 不足やモデルの
+    打ち間違いを検索の問題だと思って調べ始めることになる（実際やった）。
+    """
+
+
 def _load_dotenv():
     """隣の .env を読む。**既存の環境変数は上書きしない**（そちらが優先）。
 
@@ -137,6 +145,51 @@ TOOLS = [
 # 打ち切り時にモデルへ渡す指示。履歴に残す価値が無いので、識別できるよう定数にする。
 STOP_SEARCHING = ("Stop searching. Answer now using only the search results above. "
                   "If they are insufficient, say so explicitly.")
+
+
+# --- 進捗の出し先 -----------------------------------------------------------
+# 途中経過は `emit(kind, payload)` に流す。CLI は stderr に出し、web UI は SSE で
+# ブラウザに送る。**出し先を知っているのは emitter だけ**にして、エージェント側は
+# 誰に向かって喋っているのかを知らずに済ませる。
+#   think    思考の断片        content  答えの断片
+#   tool     ツール呼び出し     result   ツールの結果
+#   note     こちらからの注記   endturn  ターンの終わり（表示を閉じるため）
+
+def noop_emitter(kind, payload):
+    return None
+
+
+def cli_emitter(verbose=True):
+    """CLI 用の出し先。**答え（stdout）と混ぜない**ので全部 stderr。
+
+    思考は改行だらけなので字下げを保って読めるようにする。
+    ブロックを閉じる改行が要るので、開いているかどうかを覚えている。
+    """
+    if not verbose:
+        return noop_emitter
+    state = {"think_open": False}
+
+    def emit(kind, payload):
+        if kind == "think":
+            if not state["think_open"]:
+                print("  [think] ", end="", file=sys.stderr, flush=True)
+                state["think_open"] = True
+            print(payload.replace("\n", "\n          "),
+                  end="", file=sys.stderr, flush=True)
+            return
+        if state["think_open"]:                    # think 以外が来たら閉じる
+            print("\n", file=sys.stderr, flush=True)
+            state["think_open"] = False
+        if kind == "tool":
+            print(f"  [{payload['name']}] "
+                  f"{json.dumps(payload['args'], ensure_ascii=False)}",
+                  file=sys.stderr)
+        elif kind == "note":
+            print(f"  [{payload}]", file=sys.stderr)
+        # content（答えの逐次）と result（結果の中身）は CLI では出さない。
+        # 答えは ask() の戻り値でまとめて stdout に出る。
+
+    return emit
 
 
 def loaded_num_ctx(model=None):
@@ -289,8 +342,8 @@ class Conversation:
         if chars:
             self.chars_per_token = min(6.0, max(0.5, chars / prompt_tokens))
 
-    def trim(self, verbose=True):
-        """予算を超えていたら古い方から削る。**黙って忘れない**（stderr に出す）。
+    def trim(self, emit=noop_emitter):
+        """予算を超えていたら古い方から削る。**黙って忘れない**（emit で伝える）。
 
         2段階。まず古いターンから検索結果だけ剥がし、それでも足りなければ
         ターンごと捨てる。検索結果は嵩む割に後から効きにくく、
@@ -307,11 +360,34 @@ class Conversation:
         while self.turns and self.est_tokens() > budget:
             self.turns.pop(0)
             dropped += 1
-        if verbose and (stripped or dropped):
-            print(f"  [履歴を圧縮: 検索結果を剥がした {stripped}ターン / "
-                  f"丸ごと捨てた {dropped}ターン。"
-                  f"残り {len(self.turns)}ターン, 約{self.est_tokens()}トークン "
-                  f"(予算 {budget})]", file=sys.stderr)
+        if stripped or dropped:
+            emit("note", f"履歴を圧縮: 検索結果を剥がした {stripped}ターン / "
+                         f"丸ごと捨てた {dropped}ターン。"
+                         f"残り {len(self.turns)}ターン, 約{self.est_tokens()}トークン "
+                         f"(予算 {budget})")
+
+
+def _ollama_error(e):
+    """`HTTPError` から**読める理由**を作る。
+
+    `str(HTTPError)` は `HTTP Error 500: Internal Server Error` までしか言わない。
+    **理由は本文にある**（VRAM 不足、モデル名の打ち間違い、等）。読まずに投げると、
+    500 という数字だけを見て検索やネットワークを疑うことになる。
+    """
+    try:
+        detail = (json.loads(e.read().decode("utf-8", "replace"))
+                  or {}).get("error", "")
+    except Exception:                                       # noqa: BLE001
+        detail = ""
+    msg = f"Ollama が HTTP {e.code} を返した: {detail or e.reason}"
+    if "out of memory" in detail or "cudaMalloc" in detail:
+        # このマシンで実際に踏む。空き VRAM を測らずに「モデルが壊れた」と
+        # 判断しないための道しるべ。
+        msg += ("\n  VRAM が足りない。空きは `nvidia-smi` で見る。"
+                "\n  他のアプリを閉じるか、num_ctx の小さいモデルに切り替えること。")
+    elif "not found" in detail.lower():
+        msg += "\n  モデル名を確認すること（`ollama list`）。"
+    return msg
 
 
 def post(url, payload, headers, timeout):
@@ -322,12 +398,12 @@ def post(url, payload, headers, timeout):
         return json.loads(r.read().decode("utf-8"))
 
 
-def ollama_chat(messages, tools=TOOLS, think=False, show_think=False, usage=None):
+def ollama_chat(messages, tools=TOOLS, think=False, emit=noop_emitter, usage=None):
     """Ollama に投げて assistant メッセージを組み立てて返す。
 
     常にストリーミングで受ける。思考を出すのが目的で、まとめて受け取ると
     最初の1問で50秒ほど無言になり、止まっているのか考えているのか分からない。
-    思考は stderr に流し、答え（stdout）と混ざらないようにしている。
+    届いた端から `emit` に流す（CLI なら stderr、web UI なら SSE）。
 
     `usage` に dict を渡すと、最終チャンクの `prompt_eval_count` を入れて返す。
     **これが送ったプロンプトの実測トークン数**で、履歴の見積もりの補正に使う。
@@ -340,8 +416,15 @@ def ollama_chat(messages, tools=TOOLS, think=False, show_think=False, usage=None
         f"{OLLAMA}/api/chat", json.dumps(body).encode("utf-8"),
         {"Content-Type": "application/json"})
 
-    content, thinking, tool_calls, opened = [], [], [], False
-    with urllib.request.urlopen(req, timeout=900) as r:
+    content, thinking, tool_calls = [], [], []
+    try:
+        conn = urllib.request.urlopen(req, timeout=900)
+    except urllib.error.HTTPError as e:
+        raise OllamaFailed(_ollama_error(e)) from None
+    except urllib.error.URLError as e:
+        raise OllamaFailed(f"Ollama ({OLLAMA}) に繋がらない: {e.reason}。"
+                           f"start.bat か webui.bat から起動すること。") from None
+    with conn as r:
         for raw in r:
             raw = raw.strip()
             if not raw:
@@ -352,16 +435,11 @@ def ollama_chat(messages, tools=TOOLS, think=False, show_think=False, usage=None
             piece = msg.get("thinking")
             if piece:
                 thinking.append(piece)
-                if show_think:
-                    if not opened:
-                        print("  [think] ", end="", file=sys.stderr, flush=True)
-                        opened = True
-                    # 思考は改行だらけなので、字下げを保って読めるようにする
-                    print(piece.replace("\n", "\n          "),
-                          end="", file=sys.stderr, flush=True)
+                emit("think", piece)
 
             if msg.get("content"):
                 content.append(msg["content"])
+                emit("content", msg["content"])
             if msg.get("tool_calls"):
                 tool_calls.extend(msg["tool_calls"])
             if chunk.get("done"):
@@ -369,9 +447,6 @@ def ollama_chat(messages, tools=TOOLS, think=False, show_think=False, usage=None
                     usage["prompt_tokens"] = chunk.get("prompt_eval_count")
                     usage["eval_tokens"] = chunk.get("eval_count")
                 break
-
-    if opened:
-        print("\n", file=sys.stderr, flush=True)
 
     out = {"role": "assistant", "content": "".join(content)}
     if thinking:
@@ -516,12 +591,12 @@ def web_fetch(url):
             "truncated": len(text) > FETCH_CHARS}
 
 
-def run_tool(name, args, user_question=""):
+def run_tool(name, args, user_question="", emit=noop_emitter):
     if name == "web_search":
         mr = args.get("max_results") or 5
         q = strip_stale_year(args.get("query", ""), user_question)
         if q != args.get("query", ""):
-            print(f"  [年号を除去] {args.get('query')!r} -> {q!r}", file=sys.stderr)
+            emit("note", f"年号を除去: {args.get('query')!r} -> {q!r}")
         n = max(1, min(10, int(mr)))
         res = {"brave": brave_search, "ddgs": ddgs_search,
                "searxng": searxng_search}[BACKEND](q, n)
@@ -537,7 +612,7 @@ def run_tool(name, args, user_question=""):
     return res
 
 
-def ask(question, conv=None, force=False, verbose=True, think=True):
+def ask(question, conv=None, force=False, verbose=True, think=True, emit=None):
     """1ターン分を回して最終回答を返す。
 
     `conv` を渡すと、その履歴を前に付けて送り、**終わったターンを履歴に積む**。
@@ -545,26 +620,30 @@ def ask(question, conv=None, force=False, verbose=True, think=True):
 
     ターンは最後まで通ってから積む。途中で `SearchFailed` が飛べば
     **質問ごと履歴に残らない**が、モデルが答えていない以上それが正しい。
+
+    `emit(kind, payload)` に進捗が流れる。CLI は stderr、web UI は SSE。
+    kind は think / content / tool / result / note。
     """
-    show = verbose and think
+    if emit is None:
+        emit = cli_emitter(verbose)
     if conv is None:
         conv = Conversation()
-    conv.trim(verbose)
+    conv.trim(emit)
 
     turn = [{"role": "user", "content": question}]
 
     def send(tools):
         sent = conv.messages(turn)
         usage = {}
-        msg = ollama_chat(sent, tools=tools, think=think, show_think=show, usage=usage)
+        msg = ollama_chat(sent, tools=tools, think=think, emit=emit, usage=usage)
         conv.observe(usage.get("prompt_tokens"), sent)
         return msg
 
     if force:
         # モデルの判断に任せず、こちらで1回目の検索を済ませて結果を渡す。
-        res = run_tool("web_search", {"query": question}, question)
-        if verbose:
-            print(f"  [forced search] {question}", file=sys.stderr)
+        emit("note", f"forced search: {question}")
+        res = run_tool("web_search", {"query": question}, question, emit)
+        emit("result", {"name": "web_search", "result": res})
         turn.append({"role": "tool", "tool_name": "web_search",
                      "content": json.dumps(res, ensure_ascii=False)[:8000]})
 
@@ -574,27 +653,27 @@ def ask(question, conv=None, force=False, verbose=True, think=True):
         if not calls:
             turn.append(msg)
             conv.add_turn(turn)
+            emit("endturn", None)      # CLI 側で開いたままの思考ブロックを閉じる
             return msg.get("content", "")
         turn.append(msg)
         for c in calls:
             fn = c["function"]
             args = fn.get("arguments") or {}
-            if verbose:
-                print(f"  [{fn['name']}] {json.dumps(args, ensure_ascii=False)}",
-                      file=sys.stderr)
-            res = run_tool(fn["name"], args, question)
+            emit("tool", {"name": fn["name"], "args": args})
+            res = run_tool(fn["name"], args, question, emit)
+            emit("result", {"name": fn["name"], "result": res})
             turn.append({"role": "tool", "tool_name": fn["name"],
                          "content": json.dumps(res, ensure_ascii=False)[:8000]})
 
     # 上限に達した。日付が分からないせいでモデルは「もっと新しいものがあるはず」と
     # 検索を繰り返しがち（実測）。ここで**ツールを外して**もう一度呼び、
     # 集めた結果から答えさせる。記憶から答えさせるのとは違う点に注意。
-    if verbose:
-        print(f"  [{MAX_ROUNDS}回で打ち切り。集めた結果から回答させる]", file=sys.stderr)
+    emit("note", f"{MAX_ROUNDS}回で打ち切り。集めた結果から回答させる")
     turn.append({"role": "user", "content": STOP_SEARCHING})
     msg = send(None)
     turn.append(msg)
     conv.add_turn(turn)
+    emit("endturn", None)
     return msg.get("content", "")
 
 
@@ -687,6 +766,9 @@ class Repl:
                       self.verbose, self.think))
         except SearchFailed as e:
             print(f"検索に失敗した: {e}", file=sys.stderr)
+        except OllamaFailed as e:
+            # 対話モードは落とさない。モデルを切り替えれば続けられる。
+            print(f"{e}", file=sys.stderr)
 
     # -- コマンド ----------------------------------------------------------
     #   docstring の1行目がそのまま /help の説明になる。
@@ -799,6 +881,9 @@ def main():
             print(ask(" ".join(a.question), None, a.force, not a.quiet, a.think))
         except SearchFailed as e:
             print(f"検索に失敗した: {e}", file=sys.stderr)
+            sys.exit(1)
+        except OllamaFailed as e:
+            print(f"{e}", file=sys.stderr)
             sys.exit(1)
         return
 
