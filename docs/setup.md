@@ -74,6 +74,16 @@ NVIDIA GeForce RTX 5060 Ti, 16311 MiB
 
 C: 以外に置きたい場合だけ。**不要ならこの節は飛ばす。**
 
+**設定箇所は2つあり、両方を同じパスに合わせる。** `start.bat` / `webui.bat` は
+`ollama app.exe` を経由して Ollama を起動するので、**アプリ側の設定が勝つ**。
+環境変数だけ変えても効かない（機序と実測は → `docs/windows-bat.md`）。
+
+まずアプリ側:
+
+* **Settings → Model location** を目的のパスに変える
+
+次に環境変数（`ollama serve` を直接立てるときに効く）:
+
 ```powershell
 [Environment]::SetEnvironmentVariable('OLLAMA_MODELS','E:\llm\ollama','User')
 ```
@@ -90,15 +100,11 @@ robocopy "$env:USERPROFILE\.ollama\models" "E:\llm\ollama" /E /MOVE
 ollama list
 ```
 
-> **ハマりどころ**: **この環境変数はデスクトップアプリの設定に負ける。**
-> アプリは `%LOCALAPPDATA%\Ollama\db.sqlite` の `settings.models` を持っていて、
-> `ollama app.exe` が `serve` を起動するときに `OLLAMA_MODELS` をその値で上書きする。
-> 食い違っていると **`ollama list` が空になり、全リクエストが 404 "model not found" になる**。
+> **ハマりどころ**: 2つが食い違っていると **`ollama list` が空になり、
+> 全リクエストが 404 "model not found" になる**。
 > モデルが消えたように見えても、ディスク上には無事にある。
->
-> **環境変数を設定したら、アプリの Settings → Model location も同じパスに合わせること。**
-> どちらが効いているかは `%LOCALAPPDATA%\Ollama\server.log` の `msg="server config"` 行で確認する
-> （→ `docs/windows-bat.md`）。
+> どちらが効いたかは `%LOCALAPPDATA%\Ollama\server.log` の
+> **最後の** `msg="server config"` 行で確認する。
 
 ---
 
@@ -222,8 +228,8 @@ VRAM が 16GB 未満なら、`100% GPU` が出るまで `num_ctx` を下げて�
 
 | 症状 | 原因と対処 |
 |---|---|
-| `ollama list` が突然空。全部 404 | **デスクトップアプリの設定が `OLLAMA_MODELS` を上書きしている。** `server.log` の `msg="server config"` で効いている値を確認し、アプリの Settings → Model location を直す。手順2の注意を参照。**モデルはディスク上には残っている** |
-| pull したのに別の場所に落ちた | 同上。アプリ設定と環境変数が食い違うと、見ている先が起動のたびに変わる。`ollama show --modelfile <model>` で blob の実際のパスを確認する |
+| `ollama list` が突然空。全部 404 | **デスクトップアプリの設定が `OLLAMA_MODELS` を上書きしている。** `server.log` の最後の `msg="server config"` で効いている値を確認し、アプリの Settings → Model location を直す。手順2を参照。**モデルはディスク上には残っている** |
+| pull したのに別の場所に落ちた | アプリ設定と環境変数が食い違っていて、**pull 時に効いていたのが期待と別の側だった**（アプリ経由で起動したか、`serve` を直接立てたかで変わる）。`ollama show --modelfile <model>` で blob の実際のパスを確認する。※上の行と同じ原因と見ているが、この症状単体での切り分けはしていない |
 | モデルが読めない / アーキ非対応と言われる | Ollama が古い。`ollama --version` を確認して更新する |
 | `ollama create` でディスクが激増した | `FROM` に blob の絶対パスを書いている。**モデル名**を書くこと |
 | `ollama show --modelfile` の `TEMPLATE` が `{{ .Prompt }}` になっている | **表示が嘘。** 実際は GGUF 内蔵の jinja が効いている。system prompt が効くか実際に投げて確かめる方が早い |
