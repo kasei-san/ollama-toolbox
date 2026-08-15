@@ -20,16 +20,38 @@ stdin がリダイレクトされていると `Input redirection is not supporte
 Git Bash から起動すると GNU coreutils の `timeout` に解決されて `/t` を拒否する。
 **`ping -n 2 127.0.0.1` で待つ。**
 
-## `OLLAMA_MODELS` を明示する
+## `OLLAMA_MODELS` はデスクトップアプリの設定に負ける
 
-設定より前に起動したシェルから叩くと Ollama が既定のモデルディレクトリを見て
-`ollama list` が空になり、全リクエストが 404 `model not found` になる。
+`ollama list` が空になり、全リクエストが 404 `model not found` になることがある。
+**モデルは消えていない。サーバが別のディレクトリを見ているだけ。**
 
-**このマシンでは実際に踏んだ。** デスクトップアプリは自分の設定
-（`%LOCALAPPDATA%\Ollama\db.sqlite` の `models` 列）を持っていて、
-そこには別のパスが入っている。動いているのは**ログイン環境のユーザー環境変数
-`OLLAMA_MODELS` が勝っているから**であって、環境変数の無いシェルから
-アプリを起動し直すとモデルが見えなくなる。
+デスクトップアプリは自分の設定（`%LOCALAPPDATA%\Ollama\db.sqlite` の `settings.models`）
+を持っていて、**`ollama app.exe` が `serve` を起動するときに、この値で
+ユーザー環境変数 `OLLAMA_MODELS` を上書きする。**
+
+`start.bat` / `webui.bat` はどちらも `ollama app.exe` を叩くので、
+**bat から起動した場合は必ずアプリ設定が勝つ。** bat 側で `set OLLAMA_MODELS` しても届かない。
+
+> **以前ここには「ユーザー環境変数が勝っている」と書いてあった。逆だった。**
+> 環境変数側のパスで動いていた時期があったので、そちらが勝つと誤読していた。
+> 実際は「アプリ設定と環境変数がたまたま同じ場所を指していた」か、
+> アプリを経由せずに `serve` が立っていたか、のどちらか。
+
+**上書きされるのは models だけ。** 同じ起動で `OLLAMA_FLASH_ATTENTION` は素通しで届いていた。
+「環境変数が丸ごと効いていない」と読むと原因を外す。
+
+### 診断は server.log
+
+`%LOCALAPPDATA%\Ollama\server.log` の `msg="server config"` 行に**実際に効いた値**が出る。
+ここが唯一の権威。シェルで `echo %OLLAMA_MODELS%` を見ても、それはサーバの設定ではない。
+
+```
+OLLAMA_MODELS:E:\\ollama\\models   <- 効いている値
+msg="total blobs: 0"               <- 実体が無い証拠
+```
+
+**直し方はアプリの Settings -> Model location。**
+変更すると `serve` が再起動して反映される（pid が変わるので確認できる）。
 
 ## 環境変数は「自分が起動したとき」しか効かない
 
